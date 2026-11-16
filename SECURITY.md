@@ -36,6 +36,55 @@ without the secret.
 
 Set `AGENT_MESSAGE_AUTH=false` only for local debugging.
 
+### Asymmetric signing (Ed25519)
+
+`AGENT_SIGNING_MODE=ed25519` replaces the symmetric HMAC signer with Ed25519 for
+messages, approvals and evidence records. The private key is kept offline in
+CI/CD or inside a KMS; runtime nodes are intended to hold only the public
+verification key.
+
+Key custody:
+
+* CI/CD or a KMS holds the private key. Runtime nodes mount
+  `AGENT_ED25519_PUBLIC_KEY` or `AGENT_ED25519_PUBLIC_KEY_FILE` only.
+* `python -m agents keygen` generates a PKCS#8 private key (`secrets/`) and a raw
+  hex public key (`trust/`). `AGENT_ED25519_KEY_ID` labels the key in logs and
+  rotation records.
+* With only a public key, the runtime is **verification-only**: it validates
+  messages, approvals and evidence but refuses to sign, so an audit/read-only
+  node cannot mint records.
+* An active runtime signs through a KMS or signing sidecar by setting
+  `AGENT_KMS_SIGN_URL` (and optionally `AGENT_KMS_SIGN_TOKEN_FILE`). The private
+  key never enters the mesh process. The endpoint receives a `POST` containing
+  the exact bytes to raw-sign with Ed25519 and returns
+  `{"signature": "<hex or base64>"}`.
+* A local private key (`AGENT_ED25519_PRIVATE_KEY_FILE`) is supported for CI
+  signing jobs and development, and must not be mounted on runtime nodes.
+
+Capability cards use a detached signature produced in CI:
+
+```bash
+python -m agents keygen --private-key-file secrets/ed25519_private.pem \
+  --public-key-file trust/ed25519_public.hex
+python -m agents sign-config --key-file secrets/ed25519_private.pem
+# runtime:
+AGENT_SIGNING_MODE=ed25519
+AGENT_ED25519_PUBLIC_KEY_FILE=/etc/usoc/ed25519_public.hex
+AGENT_SUBSYSTEMS_SIGNATURE_FILE=/etc/usoc/subsystems.yaml.sig
+AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true
+```
+
+Startup verifies the exact file bytes against the detached signature before
+parsing any capability card. Ed25519 signatures cover a domain-separated
+envelope (`scope`, `identity`, canonical body), so a signature cannot be
+replayed from one purpose or sender into another.
+
+Rotation: publish the new public key and key id to runtime nodes, then switch
+the signer. HMAC-signed records are not valid in Ed25519 mode (and vice versa),
+so rotate during a maintenance window or run a verifier that trusts the old key
+while it drains. A multi-key trust bundle is the next step for zero-downtime
+rotation.
+
 ### Approval integrity
 
 Consequential actions (`execute`, `contain`) require a human approval. The
@@ -146,14 +195,18 @@ recipients, senders, action classes and topics each subsystem may use. A runtime
 edit is a privilege escalation, so startup verifies the file before parsing it
 (`config.verify_subsystems_file`, called by `load_registry`).
 
-Pin the exact bytes with one or both of:
+Pin the exact bytes with one or more of:
 
 * `AGENT_SUBSYSTEMS_MANIFEST_HASH` — SHA-256 of the file.
 * `AGENT_SUBSYSTEMS_SIGNATURE` — HMAC-SHA256 over the file bytes keyed with
   `AGENT_SHARED_SECRET`.
+* `AGENT_SUBSYSTEMS_SIGNATURE_ED25519` or `AGENT_SUBSYSTEMS_SIGNATURE_FILE` —
+  detached Ed25519 signature produced offline in CI/CD. Runtime verifies it
+  with `AGENT_ED25519_PUBLIC_KEY(_FILE)` and never needs the private key.
 
-Generate the values with `python -m agents integrity`, or verify a deployment
-with `python -m agents integrity --check`. Set
+Generate the values with `python -m agents integrity` (HMAC) or
+`python -m agents sign-config` (Ed25519), or verify a deployment with
+`python -m agents integrity --check`. Set
 `AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true` in production so a missing pin fails
 closed instead of trusting the file on disk.
 

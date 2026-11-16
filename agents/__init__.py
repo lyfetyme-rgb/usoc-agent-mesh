@@ -1,5 +1,6 @@
 """USOC: nine governed subsystem agents on a typed message bus."""
 
+from .asymmetric import Ed25519KMSSigner, Ed25519Signer, Ed25519Verifier
 from .bus import Bus, InMemoryBus, RedisBus, build_bus
 from .config import Settings, get_settings
 from .connectors import (
@@ -87,6 +88,9 @@ __all__ = [
     "CorrelationResult",
     "DecisionType",
     "EchoLLM",
+    "Ed25519KMSSigner",
+    "Ed25519Signer",
+    "Ed25519Verifier",
     "EntityType",
     "Event",
     "EvidenceChain",

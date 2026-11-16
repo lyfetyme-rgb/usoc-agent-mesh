@@ -1,9 +1,11 @@
-"""CLI: python -m agents {demo,list,doctor,integrity,serve,probe,health,approvals,approve,deny,ingest,demo-fragmentation}
+"""CLI: python -m agents {demo,list,doctor,integrity,keygen,sign-config,serve,probe,health,approvals,approve,deny,ingest,demo-fragmentation}
 
     python -m agents demo "Collect edge telemetry, analyse anomalies, record evidence"
     python -m agents list
     python -m agents doctor
     python -m agents integrity
+    python -m agents keygen --private-key-file secrets/ed25519_private.pem --public-key-file trust/ed25519_public.hex
+    python -m agents sign-config --key-file secrets/ed25519_private.pem
     python -m agents serve --host 127.0.0.1 --port 8080
     python -m agents probe --url http://127.0.0.1:8080/ready
     python -m agents health
@@ -600,6 +602,50 @@ def cmd_integrity(args: argparse.Namespace) -> int:
         print(f"AGENT_SUBSYSTEMS_SIGNATURE={signature}")
     else:
         print("AGENT_SUBSYSTEMS_SIGNATURE=unavailable (set AGENT_SHARED_SECRET to sign)")
+
+    if settings.signing_mode == "ed25519" or settings.ed25519_private_key_file:
+        from .asymmetric import fingerprint, load_private_key, sign_file
+
+        if settings.ed25519_private_key or settings.ed25519_private_key_file:
+            private = load_private_key(
+                settings.ed25519_private_key, settings.ed25519_private_key_file
+            )
+            ed25519 = sign_file(private, settings.subsystems_file)
+            print(f"AGENT_SUBSYSTEMS_SIGNATURE_ED25519={ed25519}")
+            print(
+                f"ed25519_key_id={settings.ed25519_key_id} "
+                f"fingerprint={fingerprint(private.public_key())}"
+            )
+    return 0
+
+
+def cmd_keygen(args: argparse.Namespace) -> int:
+    from .asymmetric import fingerprint, generate_keypair, private_key_pem, public_key_hex
+    from .security import secure_dir, secure_file
+
+    private_key, public_key = generate_keypair()
+    private_path = Path(args.private_key_file)
+    public_path = Path(args.public_key_file)
+    secure_dir(private_path.parent)
+    secure_dir(public_path.parent)
+    private_path.write_text(private_key_pem(private_key), encoding="utf-8")
+    public_path.write_text(public_key_hex(public_key) + "\n", encoding="utf-8")
+    secure_file(private_path)
+    secure_file(public_path)
+    print(f"private key: {private_path}  (offline only; never mount on a runtime node)")
+    print(f"public key:  {public_path}")
+    print(f"fingerprint: {fingerprint(public_key)}")
+    return 0
+
+
+def cmd_sign_config(args: argparse.Namespace) -> int:
+    from .asymmetric import load_private_key, sign_file
+
+    settings = _settings(args)
+    private = load_private_key(None, args.key_file)
+    out = args.out or f"{settings.subsystems_file}.sig"
+    signature = sign_file(private, settings.subsystems_file, out)
+    print(f"{out}: {signature}")
     return 0
 
 
@@ -619,6 +665,20 @@ def build_parser() -> argparse.ArgumentParser:
         "integrity", help="print or verify the capability-card manifest hash/signature"
     )
     integrity.add_argument("--check", action="store_true", help="verify pinned values instead of printing")
+    keygen = sub.add_parser(
+        "keygen", help="generate an Ed25519 keypair (private key for CI/KMS custody)"
+    )
+    keygen.add_argument(
+        "--private-key-file", default="secrets/ed25519_private.pem", help="offline private key path"
+    )
+    keygen.add_argument(
+        "--public-key-file", default="trust/ed25519_public.hex", help="runtime public key path"
+    )
+    sign_config = sub.add_parser(
+        "sign-config", help="sign subsystems.yaml with an offline Ed25519 private key"
+    )
+    sign_config.add_argument("--key-file", required=True, help="Ed25519 private key (PEM/hex)")
+    sign_config.add_argument("--out", help="detached signature path (default: <registry>.sig)")
     serve = sub.add_parser("serve", help="start the mesh, health endpoint and recovery loop")
     serve.add_argument("--host", help="health bind address (default AGENT_HEALTH_HOST)")
     serve.add_argument("--port", type=int, help="health port (default AGENT_HEALTH_PORT)")
@@ -664,6 +724,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor(args)
     if args.command == "integrity":
         return cmd_integrity(args)
+    if args.command == "keygen":
+        return cmd_keygen(args)
+    if args.command == "sign-config":
+        return cmd_sign_config(args)
     if args.command == "approvals":
         return cmd_approvals(args)
     if args.command == "probe":

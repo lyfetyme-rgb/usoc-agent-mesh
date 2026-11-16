@@ -145,6 +145,17 @@ def build_signer(settings: Any) -> Signer | None:
     """
     if not getattr(settings, "message_auth", True):
         return None
+    mode = str(getattr(settings, "signing_mode", "hmac") or "hmac").lower()
+    if mode == "ed25519":
+        # Asymmetric mode: the runtime may hold only a public verification key,
+        # or delegate signing to a KMS. No shared HMAC secret is required.
+        from .asymmetric import build_ed25519_signer
+
+        return build_ed25519_signer(settings)
+    if mode not in ("hmac", "symmetric"):
+        raise SecurityError(
+            f"unknown AGENT_SIGNING_MODE {mode!r}; expected 'hmac' or 'ed25519'"
+        )
     secret = read_secret(
         getattr(settings, "shared_secret", None),
         getattr(settings, "shared_secret_file", None),

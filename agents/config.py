@@ -50,7 +50,23 @@ class Settings(BaseSettings):
     # missing pin fails closed instead of silently trusting the file on disk.
     subsystems_manifest_hash: str | None = Field(default=None, repr=False)
     subsystems_signature: str | None = Field(default=None, repr=False)
+    subsystems_signature_ed25519: str | None = Field(default=None, repr=False)
+    subsystems_signature_file: Path | None = None
     require_subsystems_integrity: bool = False
+
+    # asymmetric signing: Ed25519 private keys belong to CI/CD or a KMS.
+    # Runtime nodes should mount only the public verification key.
+    signing_mode: Literal["hmac", "ed25519"] = "hmac"
+    ed25519_private_key: str | None = Field(default=None, repr=False)
+    ed25519_private_key_file: Path | None = None
+    ed25519_public_key: str | None = None
+    ed25519_public_key_file: Path | None = None
+    ed25519_key_id: str = "default"
+    # KMS/sidecar signing endpoint; the private key never enters this process.
+    kms_sign_url: str | None = None
+    kms_sign_token: str | None = Field(default=None, repr=False)
+    kms_sign_token_file: Path | None = None
+    kms_sign_timeout_s: float = 5.0
 
     # service: container health/readiness endpoint
     health_host: str = "127.0.0.1"
@@ -132,20 +148,34 @@ def verify_subsystems_file(path: str | Path, settings: Settings | None = None) -
 
     ``subsystems.yaml`` is the IAM policy store: it decides which tools and
     topics each subsystem may use. A runtime edit would be privilege escalation,
-    so startup refuses a file that does not match the pinned SHA-256 or HMAC.
-    Missing pins are allowed for local development, but setting
-    ``AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true`` makes them mandatory.
+    so startup refuses a file that does not match a pinned SHA-256, HMAC, or
+    Ed25519 signature.
+
+    Ed25519 verification is the offline model: CI signs the file with a private
+    key and the runtime mounts only ``AGENT_ED25519_PUBLIC_KEY(_FILE)``. Missing
+    pins are allowed for local development, but
+    ``AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true`` makes at least one mandatory.
     """
     settings = settings or get_settings()
     data, digest = _pinned_digests(path)
     expected_hash = (settings.subsystems_manifest_hash or "").strip().lower()
     expected_signature = (settings.subsystems_signature or "").strip().lower()
+    expected_ed25519 = (settings.subsystems_signature_ed25519 or "").strip()
+    if not expected_ed25519 and settings.subsystems_signature_file:
+        try:
+            expected_ed25519 = Path(settings.subsystems_signature_file).read_text(
+                encoding="utf-8"
+            ).strip()
+        except OSError as exc:
+            raise SecurityError(
+                f"cannot read AGENT_SUBSYSTEMS_SIGNATURE_FILE: {exc}"
+            ) from exc
 
-    if not expected_hash and not expected_signature:
+    if not expected_hash and not expected_signature and not expected_ed25519:
         if settings.require_subsystems_integrity:
             raise SecurityError(
-                "AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY is set but neither "
-                "AGENT_SUBSYSTEMS_MANIFEST_HASH nor AGENT_SUBSYSTEMS_SIGNATURE is configured"
+                "AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY is set but no manifest hash or "
+                "signature (HMAC or Ed25519) is configured"
             )
         return digest
 
@@ -165,6 +195,20 @@ def verify_subsystems_file(path: str | Path, settings: Settings | None = None) -
         if len(expected_signature) != 64 or not hmac.compare_digest(actual, expected_signature):
             raise SecurityError(
                 "subsystems file HMAC does not match AGENT_SUBSYSTEMS_SIGNATURE"
+            )
+
+    if expected_ed25519:
+        from .asymmetric import configured_public_key, load_private_key, verify_bytes
+
+        private_key = None
+        if settings.ed25519_private_key or settings.ed25519_private_key_file:
+            private_key = load_private_key(
+                settings.ed25519_private_key, settings.ed25519_private_key_file
+            )
+        public_key = configured_public_key(settings, private_key=private_key)
+        if not verify_bytes(public_key, data, expected_ed25519):
+            raise SecurityError(
+                "subsystems file Ed25519 signature verification failed"
             )
     return digest
 
