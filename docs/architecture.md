@@ -484,7 +484,7 @@ governance to land before higher-risk autonomy.
 | C — Communication architecture | `contracts.py`, `bus.py`, this document | Protobuf/gRPC, authenticated service identity |
 | D — Implementation blueprint | package layout and composition root | service boundaries for role workers |
 | E — Security and governance | `governance.py`, `evidence.py`, `security.py`, `usoc_agents.py` | OPA/Rego, per-agent keys, signed authorization artifacts |
-| F — Test and verification | 89 tests across contracts, bus, runtime, routing, governance, security | integration, performance, fault-injection suites |
+| F — Test and verification | 176 tests across contracts, bus, runtime, routing, governance, security | integration, performance, fault-injection suites |
 | G — Phased roadmap | phases below | resource and delivery schedule |
 | H — Operational readiness | `health` and diagnostics | evidence-backed maturity assessment per subsystem |
 
