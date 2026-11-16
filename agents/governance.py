@@ -23,7 +23,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .contracts import ActionClass, Classification, RiskLevel
 from .security import Signer, exclusive_lock, secure_dir, secure_file
@@ -125,6 +125,7 @@ class InMemoryApprovalStore:
         approvers: set[str] | None = None,
         require_allowlist: bool = False,
         ttl_s: int = 86_400,
+        approver_verifier: Any = None,
     ) -> None:
         self._items: dict[str, ApprovalRequest] = {}
         self._lock = asyncio.Lock()
@@ -132,6 +133,7 @@ class InMemoryApprovalStore:
         self.approvers = {a for a in (approvers or set()) if a}
         self.require_allowlist = require_allowlist
         self.ttl_s = ttl_s
+        self.approver_verifier = approver_verifier
 
     def _sign(self, req: ApprovalRequest) -> ApprovalRequest:
         if self.signer is None:
@@ -149,6 +151,8 @@ class InMemoryApprovalStore:
             raise ValueError("approver allowlist is not configured (AGENT_APPROVERS)")
         if self.approvers and name not in self.approvers:
             raise ValueError(f"approver {name!r} is not in the allowlist")
+        if self.approver_verifier is not None and not self.approver_verifier(name, req):
+            raise ValueError(f"approver {name!r} failed cryptographic verification")
         if name == req.requested_by:
             raise ValueError("the requester cannot approve their own request")
         return name
@@ -227,12 +231,14 @@ class FileApprovalStore(InMemoryApprovalStore):
         approvers: set[str] | None = None,
         require_allowlist: bool = False,
         ttl_s: int = 86_400,
+        approver_verifier: Any = None,
     ) -> None:
         super().__init__(
             signer=signer,
             approvers=approvers,
             require_allowlist=require_allowlist,
             ttl_s=ttl_s,
+            approver_verifier=approver_verifier,
         )
         self.path = Path(path)
         secure_dir(self.path.parent)
@@ -325,6 +331,20 @@ class PolicyConfig(BaseModel):
     authorization_ttl_s: int = AUTHORIZATION_TTL_S
     approval_ttl_s: int = 86_400
 
+    @field_validator("governed_actions")
+    @classmethod
+    def _non_empty_governed(cls, value: list[ActionClass]) -> list[ActionClass]:
+        if not value:
+            raise ValueError("governed_actions must not be empty")
+        return value
+
+    @field_validator("approval_ttl_s", "authorization_ttl_s")
+    @classmethod
+    def _positive_ttl(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("ttl must be positive")
+        return value
+
 
 class PolicyEngine:
     """Deterministic policy evaluation. No model, no network, no exceptions."""
@@ -341,7 +361,14 @@ class PolicyEngine:
     def target_allowed(self, target: str | None) -> bool:
         if not target:
             return False
-        return any(fnmatch.fnmatchcase(target, pattern) for pattern in self.config.allowed_targets)
+        if ".." in target or target.startswith("/") or target.startswith("\\\\"):
+            return False
+        import posixpath
+
+        normalized = posixpath.normpath(target.replace("\\\\", "/"))
+        if normalized.startswith("../") or normalized == "..":
+            return False
+        return any(fnmatch.fnmatchcase(normalized, pattern) for pattern in self.config.allowed_targets)
 
     async def evaluate(
         self,
@@ -517,5 +544,8 @@ class PolicyEngine:
 
     @staticmethod
     def screen_text(text: str) -> list[str]:
-        lowered = text.lower()
+        import unicodedata
+
+        normalized = unicodedata.normalize("NFKC", str(text)).casefold()
+        lowered = " ".join(normalized.split())
         return [pattern for pattern in PROHIBITED_PATTERNS if pattern in lowered]

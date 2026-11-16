@@ -85,7 +85,7 @@ async def evaluate(policy: PolicyEngine, **overrides):
 
 # -- message authentication -------------------------------------------------
 async def test_memory_bus_signs_and_verifies_messages():
-    bus = InMemoryBus(signer=signer())
+    bus = InMemoryBus(signer=signer(), insecure_dev_mode=True)
     await bus.subscribe("a", [])
     await bus.publish(Message.task(sender="orchestrator", recipient="a", objective="work"))
 
@@ -97,7 +97,7 @@ async def test_memory_bus_signs_and_verifies_messages():
 
 
 async def test_tampered_message_is_quarantined_not_delivered():
-    bus = InMemoryBus(signer=signer())
+    bus = InMemoryBus(signer=signer(), insecure_dev_mode=True)
     await bus.subscribe("a", [])
     original = signer().sign_message(
         Message.task(sender="orchestrator", recipient="a", objective="work")

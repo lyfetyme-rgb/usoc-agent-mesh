@@ -157,6 +157,7 @@ class BaseAgent:
         self.evidence = evidence
         self.approvals = approvals
         self.pending = Pending()
+        self._in_flight: set[str] = set()
         self._sem = asyncio.Semaphore(settings.max_concurrency)
         self._tasks: set[asyncio.Task] = set()
         self._loop_task: asyncio.Task | None = None
@@ -242,6 +243,23 @@ class BaseAgent:
                 await self._reject(msg, ErrorCode.HANDLER, repr(exc))
 
     async def _on_task(self, msg: Message, spec: TaskSpec) -> None:
+        # -- replay guard: drop a task already being processed in this agent --
+        if msg.correlation_id in self._in_flight:
+            self.metrics.inc("task.duplicate_inflight")
+            await self._reject(msg, "duplicate_inflight", "task is already being processed")
+            return
+        self._in_flight.add(msg.correlation_id)
+        try:
+            await self._on_task_body(msg, spec)
+        finally:
+            self._in_flight.discard(msg.correlation_id)
+
+    async def _on_task_body(self, msg: Message, spec: TaskSpec) -> None:
+        # -- least-privilege: only configured senders may task this agent --
+        if self.spec.allowed_senders is not None and msg.sender not in self.spec.allowed_senders and "*" not in self.spec.allowed_senders:
+            self.metrics.inc("task.sender_denied")
+            await self._reject(msg, "sender_not_permitted", f"sender {msg.sender!r} is not permitted to task {self.id}")
+            return
         # -- governance gate: no consequential action without a policy ALLOW --
         decision: GovernanceDecision | None = None
         try:
@@ -349,6 +367,24 @@ class BaseAgent:
 
     async def _authorize(self, msg: Message, spec: TaskSpec) -> GovernanceDecision | None:
         """Return a decision for consequential work, None for ordinary work."""
+        # -- least-privilege: per-agent action class / target scoping --
+        if self.spec.allowed_action_classes is not None and spec.action_class not in self.spec.allowed_action_classes:
+            self.metrics.inc("policy.denied")
+            return GovernanceDecision(
+                decision=DecisionType.DENY,
+                policy_ref="pol-scope",
+                reasons=[f"action class {spec.action_class.value} not permitted for {self.id}"],
+            )
+        if self.spec.allowed_targets is not None and spec.target is not None:
+            import fnmatch
+
+            if not any(fnmatch.fnmatchcase(spec.target, p) for p in self.spec.allowed_targets):
+                self.metrics.inc("policy.denied")
+                return GovernanceDecision(
+                    decision=DecisionType.DENY,
+                    policy_ref="pol-scope",
+                    reasons=[f"target {spec.target!r} not permitted for {self.id}"],
+                )
         if self.policy is None:
             # Fail closed: a missing policy engine must never let governed work
             # through. Only read-only/recommend/simulate work is unaffected.
@@ -362,18 +398,21 @@ class BaseAgent:
                     ],
                 )
             return None
-        if self.id == "cyber_strike":
-            violations = self.policy.screen_text(f"{spec.objective} {spec.target or ''}")
-            if violations:
-                self.metrics.inc("policy.denied")
-                return GovernanceDecision(
-                    decision=DecisionType.DENY,
-                    policy_ref=self.policy.policy_ref(spec.action_class, spec.target, spec.risk),
-                    reasons=[f"defensive-only boundary: prohibited intent ({', '.join(violations)})"],
-                )
+        violations = self.policy.screen_text(
+            f"{spec.objective} {spec.target or ''} {spec.justification or ''}"
+        )
+        if violations:
+            self.metrics.inc("policy.denied")
+            return GovernanceDecision(
+                decision=DecisionType.DENY,
+                policy_ref=self.policy.policy_ref(spec.action_class, spec.target, spec.risk),
+                reasons=[f"defensive-only boundary: prohibited intent ({', '.join(violations)})"],
+            )
         if spec.action_class not in GOVERNED_ACTIONS:
             return None
-        return await self.policy.evaluate(
+        try:
+            return await asyncio.wait_for(
+                self.policy.evaluate(
             action=spec.action_class,
             target=spec.target,
             risk=spec.risk,
@@ -383,7 +422,16 @@ class BaseAgent:
             requested_by=msg.sender,
             justification=spec.justification or spec.objective,
             correlation_id=msg.correlation_id,
-        )
+        ),
+        timeout=5.0,
+    )
+        except asyncio.TimeoutError:
+            self.metrics.inc("policy.denied")
+            return GovernanceDecision(
+                decision=DecisionType.DENY,
+                policy_ref=self.policy.policy_ref(spec.action_class, spec.target, spec.risk),
+                reasons=["policy evaluation timed out"],
+            )
 
     async def _audit(self, kind: str, msg: Message, data: dict[str, Any]) -> str | None:
         if self.evidence is None:
@@ -421,7 +469,12 @@ class BaseAgent:
         log("task.rejected", code=payload.code, detail=detail)
 
     def _idempotency_key(self, msg: Message, spec: TaskSpec) -> str | None:
-        if not spec.idempotency_key:
+        idempotency_key = spec.idempotency_key
+        # Governed actions must be idempotent: derive a stable key from the
+        # message so redeliveries collapse instead of re-executing.
+        if not idempotency_key and spec.action_class in GOVERNED_ACTIONS:
+            idempotency_key = f"gov:{msg.correlation_id}:{spec.action_class.value}:{spec.target or ''}"
+        if not idempotency_key:
             return None
         # Scope the cache to the agent, sender, tenant and mission. A shared
         # store must never let one agent or tenant replay another's result.
@@ -429,7 +482,7 @@ class BaseAgent:
             [
                 self.id,
                 msg.sender,
-                spec.idempotency_key,
+                idempotency_key,
                 spec.objective,
                 spec.tenant_id or msg.tenant_id or "",
                 spec.mission_id or msg.mission_id or "",
@@ -551,6 +604,7 @@ class BaseAgent:
         mission_id: str | None = None,
     ) -> TaskResult:
         self._require_known(recipient)
+        self._require_delegation_allowed(recipient, action_class, target)
         msg = Message.task(
             sender=self.id,
             recipient=recipient,
@@ -575,6 +629,7 @@ class BaseAgent:
 
     async def ask(self, recipient: str, question: str, *, context: dict[str, Any] | None = None, timeout_s: float | None = None) -> QueryReply:
         self._require_known(recipient)
+        self._require_recipient_allowed(recipient)
         msg = Message(
             sender=self.id,
             recipient=recipient,
@@ -602,6 +657,32 @@ class BaseAgent:
             raise AgentError(ErrorCode.BAD_PLAN.value, "agent cannot delegate to itself")
         if self.known_agents and recipient not in self.known_agents:
             raise AgentError(ErrorCode.NO_AGENT.value, f"unknown agent: {recipient}")
+
+    def _require_recipient_allowed(self, recipient: str) -> None:
+        if self.spec.allowed_recipients is None:
+            return
+        if recipient in self.spec.allowed_recipients or "*" in self.spec.allowed_recipients:
+            return
+        raise AgentError(
+            ErrorCode.BAD_PLAN.value,
+            f"recipient {recipient!r} not permitted for {self.id}",
+        )
+
+    def _require_delegation_allowed(self, recipient: str, action_class: ActionClass, target: str | None) -> None:
+        self._require_recipient_allowed(recipient)
+        if self.spec.allowed_action_classes is not None and action_class not in self.spec.allowed_action_classes:
+            raise AgentError(
+                ErrorCode.BAD_PLAN.value,
+                f"action class {action_class.value} not permitted for {self.id}",
+            )
+        if self.spec.allowed_targets is not None and target is not None:
+            import fnmatch
+
+            if not any(fnmatch.fnmatchcase(target, p) for p in self.spec.allowed_targets):
+                raise AgentError(
+                    ErrorCode.BAD_PLAN.value,
+                    f"target {target!r} not permitted for {self.id}",
+                )
 
     async def emit(self, name: str, data: dict[str, Any] | None = None) -> None:
         await self.bus.publish(Message.event(sender=self.id, name=name, data=data))

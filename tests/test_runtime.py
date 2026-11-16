@@ -39,7 +39,7 @@ async def make_agent(spec_, bus, settings, tools, llm, known):
 
 
 async def test_agent_delegates_and_awaits_result(settings, tools):
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     llm = EchoLLM()
     known = {"caller", "worker"}
     caller = await make_agent(spec("caller", ["coordinate"]), bus, settings, tools, llm, known)
@@ -56,7 +56,7 @@ async def test_agent_delegates_and_awaits_result(settings, tools):
 
 
 async def test_unknown_recipient_fails_fast(settings, tools):
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     agent = await make_agent(spec("caller"), bus, settings, tools, EchoLLM(), {"caller"})
     try:
         with pytest.raises(AgentError) as info:
@@ -68,7 +68,7 @@ async def test_unknown_recipient_fails_fast(settings, tools):
 
 
 async def test_dead_recipient_times_out(settings, tools):
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     known = {"caller", "ghost"}
     agent = await make_agent(spec("caller"), bus, settings, tools, EchoLLM(), known)
     try:
@@ -80,7 +80,7 @@ async def test_dead_recipient_times_out(settings, tools):
 
 
 async def test_idempotency_key_deduplicates_side_effects(settings, tools):
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     llm = EchoLLM()
     await bus.subscribe("client", [])
     worker = await make_agent(spec("worker"), bus, settings, tools, llm, {"worker"})
@@ -101,7 +101,7 @@ async def test_idempotency_key_deduplicates_side_effects(settings, tools):
 async def test_expired_task_is_rejected_without_calling_the_model(settings, tools):
     from datetime import datetime, timedelta, timezone
 
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     llm = EchoLLM()
     await bus.subscribe("client", [])
     worker = await make_agent(spec("worker"), bus, settings, tools, llm, {"worker"})
@@ -122,7 +122,7 @@ async def test_expired_task_is_rejected_without_calling_the_model(settings, tool
 
 
 async def test_tool_calls_are_limited_to_the_card(settings, tools):
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     worker = await make_agent(spec("worker", tools=[]), bus, settings, tools, EchoLLM(), {"worker"})
     try:
         result = await worker._run_tool({"tool_name": "workspace.write", "arguments": {"path": "x", "content": "y"}})
@@ -132,7 +132,7 @@ async def test_tool_calls_are_limited_to_the_card(settings, tools):
 
 
 async def test_governed_task_without_a_policy_fails_closed(settings, tools):
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     await bus.subscribe("client", [])
     worker = await make_agent(spec("worker"), bus, settings, tools, EchoLLM(), {"worker"})
     try:

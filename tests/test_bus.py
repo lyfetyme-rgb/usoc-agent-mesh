@@ -5,7 +5,7 @@ from agents.contracts import Event, Message
 
 
 async def test_direct_message_reaches_only_the_recipient():
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     await bus.subscribe("a", [])
     await bus.subscribe("b", [])
     msg = Message.task(sender="orchestrator", recipient="a", objective="work")
@@ -16,7 +16,7 @@ async def test_direct_message_reaches_only_the_recipient():
 
 
 async def test_broadcast_reaches_every_subscriber():
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     await bus.subscribe("a", ["topic.alert"])
     await bus.subscribe("b", ["topic.alert"])
     await bus.publish(Message.event(sender="a", name="alert.raised", data={"level": "high"}))
@@ -27,7 +27,7 @@ async def test_broadcast_reaches_every_subscriber():
 
 
 async def test_nack_requeues_with_higher_attempt():
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     await bus.subscribe("a", [])
     await bus.publish(Message.task(sender="x", recipient="a", objective="retry me"))
     first = await bus.receive("a", timeout=0.2)
@@ -41,7 +41,7 @@ async def test_nack_requeues_with_higher_attempt():
 
 
 async def test_nack_without_requeue_dead_letters():
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     await bus.subscribe("a", [])
     await bus.publish(Message.task(sender="x", recipient="a", objective="doomed"))
     msg = await bus.receive("a", timeout=0.2)
@@ -53,7 +53,7 @@ async def test_nack_without_requeue_dead_letters():
 
 
 async def test_unrouted_broadcast_is_counted_not_dropped():
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     await bus.subscribe("a", [])
     await bus.publish(Message.event(sender="a", name="nobody.listens"))
     assert bus.stats["unrouted"] == 1

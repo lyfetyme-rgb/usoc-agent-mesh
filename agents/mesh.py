@@ -98,7 +98,8 @@ class Mesh:
             if hasattr(self.bus, "signer"):
                 self.bus.signer = self.signer
         else:
-            self.bus = build_bus(self.settings, signer=self.signer)
+            self.bus = build_bus(self.settings, signer=self.signer, insecure_dev_mode=True)
+            log("bus.acl", mode="insecure_dev (no topic ACLs configured)")
         self.llm = self._llm_override or build_llm(self.settings)
         if self._store_override:
             self.store = self._store_override

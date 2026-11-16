@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import json
 import uuid
 from datetime import datetime, timezone
@@ -17,7 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .security import Signer, secure_dir, secure_file
+from .security import Signer, exclusive_lock, secure_dir, secure_file
 
 
 class EvidenceRecord(BaseModel):
@@ -72,10 +73,15 @@ class EvidenceChain:
                 try:
                     last = EvidenceRecord.model_validate_json(line)
                 except ValueError:
-                    continue
+                    # Fail closed: a corrupt chain is not silently skipped.
+                    raise RuntimeError("evidence chain contains an invalid record")
         if last:
             self._seq = last.seq
             self._last_hash = last.hash
+        # Verify integrity on load.
+        ok, detail = self.verify()
+        if not ok:
+            raise RuntimeError(f"evidence chain verification failed: {detail}")
 
     async def append(
         self,
@@ -107,9 +113,13 @@ class EvidenceChain:
                 record.mac = self.signer.sign_record(
                     "evidence", record.model_dump(mode="json", exclude={"mac"})
                 )
-            with self.path.open("a", encoding="utf-8") as fh:
-                fh.write(record.model_dump_json() + "\n")
-                fh.flush()
+            with exclusive_lock(self.path, timeout_s=10.0):
+                with self.path.open("a", encoding="utf-8") as fh:
+                    fh.write(record.model_dump_json() + "\n")
+                    fh.flush()
+                    import os
+
+                    os.fsync(fh.fileno())
             secure_file(self.path)
             self._seq = record.seq
             self._last_hash = record.hash

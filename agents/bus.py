@@ -60,16 +60,39 @@ def _new_id() -> str:
 class InMemoryBus:
     """Fan-out queues with per-agent backpressure and a dead-letter list."""
 
-    def __init__(self, max_queue: int = 1_000, *, signer: Signer | None = None) -> None:
+    def __init__(
+        self,
+        max_queue: int = 1_000,
+        *,
+        signer: Signer | None = None,
+        publish_acl: dict[str, list[str]] | None = None,
+        subscribe_acl: dict[str, list[str]] | None = None,
+        insecure_dev_mode: bool = False,
+        sender_verifier: Any = None,
+    ) -> None:
         self._queues: dict[str, asyncio.Queue[Message]] = {}
         self._patterns: dict[str, list[str]] = defaultdict(list)
         self._max_queue = max_queue
         self.signer = signer
+        self.publish_acl = publish_acl
+        self.subscribe_acl = subscribe_acl
+        self.insecure_dev_mode = insecure_dev_mode
+        # When True and no ACL is supplied, fall back to allow-all (dev/test only).
+        self.insecure_dev_mode = insecure_dev_mode
+        self.sender_verifier = sender_verifier
         self.history: list[Message] = []
         self.dlq: list[Message] = []
         self.stats: dict[str, int] = defaultdict(int)
 
     async def subscribe(self, agent: str, topics: list[str]) -> None:
+        if self.subscribe_acl is None:
+            if not self.insecure_dev_mode:
+                raise PermissionError("subscribe denied: no subscribe_acl configured (set insecure_dev_mode=True for dev)")
+        else:
+            allowed = self.subscribe_acl.get(agent, [])
+            for t in topics:
+                if not any(fnmatchcase(t, p) for p in allowed):
+                    raise PermissionError(f"{agent} is not allowed to subscribe to {t}")
         if agent not in self._queues:
             self._queues[agent] = asyncio.Queue(maxsize=self._max_queue)
         patterns = [f"inbox.{agent}", *topics]
@@ -79,6 +102,21 @@ class InMemoryBus:
         return [a for a, pats in self._patterns.items() if any(fnmatchcase(topic, p) for p in pats)]
 
     async def publish(self, msg: Message) -> None:
+        if self.sender_verifier is not None and not self.sender_verifier(msg.sender, msg):
+            self.stats["sender_rejected"] = self.stats.get("sender_rejected", 0) + 1
+            log("bus.sender_rejected", sender=msg.sender, topic=msg.topic)
+            raise PermissionError(f"sender {msg.sender} failed identity verification")
+        if self.publish_acl is None:
+            if not self.insecure_dev_mode:
+                self.stats["acl_denied"] += 1
+                log("bus.acl_denied", sender=msg.sender, topic=msg.topic, reason="no acl configured")
+                raise PermissionError("publish denied: no publish_acl configured (set insecure_dev_mode=True for dev)")
+        else:
+            allowed = self.publish_acl.get(msg.sender, [])
+            if not any(fnmatchcase(msg.topic, p) for p in allowed):
+                self.stats["acl_denied"] += 1
+                log("bus.acl_denied", sender=msg.sender, topic=msg.topic)
+                raise PermissionError(f"{msg.sender} is not allowed to publish to {msg.topic}")
         if self.signer is not None:
             msg = self.signer.sign_message(msg)
         self.history.append(msg)
@@ -166,6 +204,10 @@ class RedisBus:
         *,
         signer: Signer | None = None,
         socket_timeout_s: float = 5.0,
+        publish_acl: dict[str, list[str]] | None = None,
+        subscribe_acl: dict[str, list[str]] | None = None,
+        insecure_dev_mode: bool = False,
+        sender_verifier: Any = None,
     ) -> None:
         import redis.asyncio as aioredis
 
@@ -183,6 +225,10 @@ class RedisBus:
         self._inflight: dict[str, str] = {}
         self._maxlen = maxlen
         self.signer = signer
+        self.publish_acl = publish_acl
+        self.subscribe_acl = subscribe_acl
+        self.insecure_dev_mode = insecure_dev_mode
+        self.sender_verifier = sender_verifier
         self._history: list[Message] = []
         self.stats: dict[str, int] = defaultdict(int)
         self.dlq_stream = f"{STREAM_PREFIX}dlq"
@@ -195,6 +241,14 @@ class RedisBus:
         return f"{STREAM_PREFIX}{topic}"
 
     async def subscribe(self, agent: str, topics: list[str]) -> None:
+        if self.subscribe_acl is None:
+            if not self.insecure_dev_mode:
+                raise PermissionError("subscribe denied: no subscribe_acl configured (set insecure_dev_mode=True for dev)")
+        else:
+            allowed = self.subscribe_acl.get(agent, [])
+            for t in topics:
+                if not any(fnmatchcase(t, p) for p in allowed):
+                    raise PermissionError(f"{agent} is not allowed to subscribe to {t}")
         streams = [self._stream(f"inbox.{agent}")]
         for topic in topics:
             if "*" in topic:
@@ -213,6 +267,21 @@ class RedisBus:
         self._streams[agent] = list(dict.fromkeys(streams))
 
     async def publish(self, msg: Message) -> None:
+        if self.sender_verifier is not None and not self.sender_verifier(msg.sender, msg):
+            self.stats["sender_rejected"] = self.stats.get("sender_rejected", 0) + 1
+            log("bus.sender_rejected", sender=msg.sender, topic=msg.topic)
+            raise PermissionError(f"sender {msg.sender} failed identity verification")
+        if self.publish_acl is None:
+            if not self.insecure_dev_mode:
+                self.stats["acl_denied"] += 1
+                log("bus.acl_denied", sender=msg.sender, topic=msg.topic, reason="no acl configured")
+                raise PermissionError("publish denied: no publish_acl configured (set insecure_dev_mode=True for dev)")
+        else:
+            allowed = self.publish_acl.get(msg.sender, [])
+            if not any(fnmatchcase(msg.topic, p) for p in allowed):
+                self.stats["acl_denied"] += 1
+                log("bus.acl_denied", sender=msg.sender, topic=msg.topic)
+                raise PermissionError(f"{msg.sender} is not allowed to publish to {msg.topic}")
         if self.signer is not None:
             msg = self.signer.sign_message(msg)
         self._history.append(msg)
@@ -331,7 +400,16 @@ class RedisBus:
         await self._redis.aclose()
 
 
-def build_bus(settings: Any, consumer: str | None = None, *, signer: Signer | None = None) -> Bus:
+def build_bus(
+    settings: Any,
+    consumer: str | None = None,
+    *,
+    signer: Signer | None = None,
+    publish_acl: dict[str, list[str]] | None = None,
+    subscribe_acl: dict[str, list[str]] | None = None,
+    insecure_dev_mode: bool = False,
+    sender_verifier: Any = None,
+) -> Bus:
     if settings.bus == "redis":
         return RedisBus(
             settings.redis_url,
@@ -339,5 +417,15 @@ def build_bus(settings: Any, consumer: str | None = None, *, signer: Signer | No
             consumer=consumer,
             signer=signer,
             socket_timeout_s=settings.redis_socket_timeout_s,
+            publish_acl=publish_acl,
+            subscribe_acl=subscribe_acl,
+            insecure_dev_mode=insecure_dev_mode,
+            sender_verifier=sender_verifier,
         )
-    return InMemoryBus(signer=signer)
+    return InMemoryBus(
+        signer=signer,
+        publish_acl=publish_acl,
+        subscribe_acl=subscribe_acl,
+        insecure_dev_mode=insecure_dev_mode,
+        sender_verifier=sender_verifier,
+    )

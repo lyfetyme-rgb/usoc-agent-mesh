@@ -158,6 +158,9 @@ def build_signer(settings: Any) -> Signer | None:
 
 # -- redaction --------------------------------------------------------------
 def redact_text(value: str) -> str:
+    import unicodedata
+
+    value = unicodedata.normalize("NFKC", str(value))
     value = BEARER.sub(r"\1***", value)
     value = BASIC.sub(r"\1***", value)
     value = URL_CREDENTIALS.sub(
@@ -170,10 +173,26 @@ def redact_url(url: str) -> str:
     return redact_text(url)
 
 
+def _normalize_key(key: Any) -> str:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\\1_\\2", str(key))
+    text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\\1_\\2", text)
+    return text.lower()
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    normalized = _normalize_key(key)
+    return bool(
+        re.search(
+            r"(?:^|[_-])(?:secret|token|password|passwd|api[_-]?key|apikey|authorization|credential|private[_-]?key|auth(?:token)?)(?:$|[_-])",
+            normalized,
+        )
+    )
+
+
 def redact_fields(fields: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in fields.items():
-        if SENSITIVE_KEY.search(str(key)):
+        if _is_sensitive_key(key):
             out[key] = "***"
         elif isinstance(value, str):
             out[key] = redact_text(value)

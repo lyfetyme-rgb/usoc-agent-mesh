@@ -882,7 +882,10 @@ async def ingest_connectors(
 # ---------------------------------------------------------------------------
 def canonical_entity(value: str) -> str:
     """Normalize an entity key for cross-tool comparison."""
-    text = " ".join(str(value).strip().lower().split())
+    import unicodedata
+
+    text = unicodedata.normalize("NFKC", str(value)).casefold()
+    text = " ".join(text.strip().split())
     return text.rstrip(".")
 
 
@@ -1051,9 +1054,20 @@ def _parse_classification(value: Any) -> Classification:
         return Classification.INTERNAL
 
 
+def _prune_depth(value: Any, depth: int = 0, max_depth: int = 4) -> Any:
+    if depth >= max_depth:
+        return str(value)[:200] if not isinstance(value, (dict, list)) else None
+    if isinstance(value, dict):
+        return {k: _prune_depth(v, depth + 1, max_depth) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_prune_depth(v, depth + 1, max_depth) for v in value[:50]]
+    return value
+
+
 def _bounded_attributes(value: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
+    value = _prune_depth(value)
     blob = json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
     if len(blob.encode("utf-8")) <= MAX_ATTRIBUTES_BYTES:
         return value

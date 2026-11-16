@@ -153,9 +153,9 @@ class Message(Strict):
     id: str = Field(default_factory=_uuid)
     correlation_id: str = Field(default_factory=_uuid)
     causation_id: str | None = None
-    sender: str
-    recipient: str | None = None
-    topic: str
+    sender: str = Field(max_length=128)
+    recipient: str | None = Field(default=None, max_length=128)
+    topic: str = Field(max_length=256)
     payload: Payload
     schema_version: str = SCHEMA_VERSION
     hop: int = Field(default=0, ge=0)

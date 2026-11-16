@@ -208,7 +208,7 @@ def test_shell_reports_fragmentation_status(
     shell = Shell(
         registry,
         agents,
-        InMemoryBus(),
+        InMemoryBus(insecure_dev_mode=True),
         Metrics(),
         None,
         fragmentation=service,
@@ -230,7 +230,7 @@ def test_shell_reports_a_broken_connector_configuration(registry) -> None:
     shell = Shell(
         registry,
         {},
-        InMemoryBus(),
+        InMemoryBus(insecure_dev_mode=True),
         Metrics(),
         None,
         fragmentation=None,
@@ -246,7 +246,7 @@ def test_aicee_summarizes_correlated_incidents_without_a_model(
     spec = registry.by_id["aicee"]
     agent = AiceeAgent(
         spec,
-        InMemoryBus(),
+        InMemoryBus(insecure_dev_mode=True),
         llm=EchoLLM(),
         tools=tools,
         settings=settings,
@@ -279,7 +279,7 @@ def test_aicee_rejects_a_non_list_payload(settings, registry, tools) -> None:
     spec = registry.by_id["aicee"]
     agent = AiceeAgent(
         spec,
-        InMemoryBus(),
+        InMemoryBus(insecure_dev_mode=True),
         llm=EchoLLM(),
         tools=tools,
         settings=settings,

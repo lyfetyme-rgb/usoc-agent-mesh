@@ -219,7 +219,7 @@ def spec(agent_id: str, name: str) -> SubsystemSpec:
 
 
 async def test_runtime_gate_returns_handoff_instead_of_executing(settings, tmp_path):
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     policy, store = make_policy(tmp_path)
     agent = SubsystemAgent(
         spec("seraphim", "Seraphim"),
@@ -257,7 +257,7 @@ async def test_runtime_gate_returns_handoff_instead_of_executing(settings, tmp_p
 
 
 async def test_runtime_gate_denies_offensive_cyber_intent(settings, tmp_path):
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     policy, store = make_policy(tmp_path)
     agent = SubsystemAgent(
         spec("cyber_strike", "Cyber Strike"),
@@ -290,7 +290,7 @@ async def test_runtime_gate_denies_offensive_cyber_intent(settings, tmp_path):
 
 
 async def test_hitl_agent_never_self_approves(settings, tmp_path):
-    bus = InMemoryBus()
+    bus = InMemoryBus(insecure_dev_mode=True)
     _, store = make_policy(tmp_path)
     agent = HitlAgent(
         spec("hitl", "Hitl"),

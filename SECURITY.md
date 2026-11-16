@@ -127,6 +127,22 @@ There is no work submission over HTTP. When `AGENT_HEALTH_TOKEN` or
 `Authorization: Bearer <token>`; comparisons are constant-time. Responses
 contain counts and status flags only.
 
+### Capability scoping (least privilege)
+
+Each subsystem declares an authorization matrix in `subsystems.yaml`:
+
+* `allowed_recipients` — agents it may delegate to (`None` = any known agent).
+* `allowed_senders` — agents that may task it (`None` = any sender).
+* `allowed_action_classes` — action classes it may propose (`None` = any).
+* `allowed_targets` — target patterns it may act on (`None` = any).
+
+These are enforced at runtime in `BaseAgent` (`_require_delegation_allowed`,
+`_require_recipient_allowed`, `_on_task`, `_authorize`) and fail closed: an
+undeclared recipient, action class or target raises `AgentError` / returns a
+policy DENY before any work runs. With no matrix declared (the default for
+existing cards) behaviour is unchanged, so scoping is opt-in and backward
+compatible.
+
 ### Read-only connectors and correlation
 
 The fragmentation layer ingests incumbent tools without giving the mesh write

@@ -21,6 +21,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .contracts import ActionClass
 from .tools import ToolRegistry
 
 EXPECTED_SUBSYSTEMS = 9
@@ -48,6 +49,13 @@ class SubsystemSpec(BaseModel):
     roles: list[str] = Field(default_factory=list, max_length=20)
     tools: list[str] = Field(default_factory=list)
     subscribes: list[str] = Field(default_factory=list)
+    # Least-privilege authorization matrix. None means "unrestricted" (backward
+    # compatible with existing capability cards). A non-None list restricts the
+    # agent to only those recipients/action classes/targets.
+    allowed_recipients: list[str] | None = None
+    allowed_senders: list[str] | None = None
+    allowed_action_classes: list[ActionClass] | None = None
+    allowed_targets: list[str] | None = None
     system_prompt: str = Field(default="", max_length=8_000)
     model_tier: Literal["fast", "strong"] = "fast"
 

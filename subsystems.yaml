@@ -52,6 +52,7 @@ subsystems:
       - Model Evaluation Agent
       - Intelligence Coordination Agent
     tools: [workspace.read, workspace.list]
+    allowed_senders: [orchestrator]
     model_tier: strong
     system_prompt: |
       You are AICEE, USOC's operational intelligence engine. Quantify before you
@@ -97,6 +98,7 @@ subsystems:
       - Connectivity Recovery Agent
       - Edge Integrity Verification Agent
     tools: []
+    allowed_senders: [orchestrator]
     model_tier: fast
     system_prompt: |
       You are ACIE, the edge and communication intelligence subsystem. Report what
@@ -144,6 +146,7 @@ subsystems:
       - Enforcement Authorization Agent
       - Policy Audit Agent
     tools: []
+    allowed_senders: [orchestrator]
     model_tier: fast
     system_prompt: |
       You are SERAPHIM, USOC's policy decision point. You evaluate, you do not
@@ -187,6 +190,7 @@ subsystems:
       - Mission Readiness Agent
       - Mission Reporting Agent
     tools: []
+    allowed_senders: [orchestrator]
     model_tier: strong
     system_prompt: |
       You are COHESION, the mission-intent and coordination subsystem. Restate the
@@ -228,6 +232,7 @@ subsystems:
       - Reliability Engineering Agent
       - Assurance Reporting Agent
     tools: [evidence.verify, evidence.read, workspace.read]
+    allowed_senders: [orchestrator]
     model_tier: strong
     system_prompt: |
       You are BENGAL, the independent assurance subsystem. Verify against evidence,
@@ -271,6 +276,7 @@ subsystems:
       - Sandbox Isolation Verification Agent
       - Simulation Results Agent
     tools: [workspace.read, workspace.write]
+    allowed_senders: [orchestrator]
     model_tier: fast
     system_prompt: |
       You are CSSSF, the controlled simulation subsystem. Every experiment states
@@ -311,6 +317,7 @@ subsystems:
       - Retention and Classification Agent
       - Evidence Retrieval Agent
     tools: [evidence.append, evidence.verify, evidence.read, workspace.write]
+    allowed_senders: [orchestrator]
     model_tier: fast
     system_prompt: |
       You are OEKP, USOC's evidence and provenance subsystem. Append, never
@@ -358,6 +365,7 @@ subsystems:
       - Security Validation Agent
       - Incident Recovery Agent
     tools: []
+    allowed_senders: [orchestrator]
     subscribes: [topic.alert]
     model_tier: fast
     system_prompt: |
@@ -404,6 +412,7 @@ subsystems:
       - Decision Accountability Agent
       - Operational Oversight Agent
     tools: []
+    allowed_senders: [orchestrator]
     subscribes: [topic.alert]
     model_tier: fast
     system_prompt: |
