@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import json
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,9 @@ from agents.asymmetric import (
     Ed25519KMSSigner,
     Ed25519Signer,
     Ed25519Verifier,
+    PublicKeySet,
     generate_keypair,
+    kms_http_signer,
     load_public_key,
     private_key_pem,
     public_key_hex,
@@ -186,3 +189,175 @@ def test_keygen_and_sign_config_cli_workflow(tmp_path: Path):
     assert verify_file(
         public_key, cards, signature_path.read_text(encoding="utf-8").strip()
     )
+
+
+def test_keyset_verifies_records_from_retired_and_active_keys():
+    old_private, old_public = keypair()
+    new_private, new_public = keypair()
+    keys = {"2025": old_public, "2026": new_public}
+    verifier = Ed25519Verifier(PublicKeySet(keys, active_key_id="2026"))
+
+    old_sig = Ed25519Signer(old_private, key_id="2025").sign_record(
+        "evidence", {"a": 1}, "oekp"
+    )
+    new_sig = Ed25519Signer(new_private, key_id="2026").sign_record(
+        "evidence", {"a": 2}, "oekp"
+    )
+    assert verifier.verify_record("evidence", {"a": 1}, old_sig, "oekp") == (True, "ok")
+    assert verifier.verify_record("evidence", {"a": 2}, new_sig, "oekp") == (True, "ok")
+
+    new_only = Ed25519Verifier(PublicKeySet({"2026": new_public}))
+    assert new_only.verify_record("evidence", {"a": 1}, old_sig, "oekp")[0] is False
+    assert verifier.key_set.describe().keys() == {"2025", "2026"}
+
+
+def test_keyset_loads_from_settings_json_and_mounted_file(tmp_path: Path):
+    old_private, old_public = keypair()
+    _, new_public = keypair()
+    signature = Ed25519Signer(old_private, key_id="2025").sign_record(
+        "evidence", {"a": 1}
+    )
+    payload = {
+        "2025": public_key_hex(old_public),
+        "2026": public_key_hex(new_public),
+    }
+
+    inline = build_signer(
+        Settings(
+            signing_mode="ed25519",
+            ed25519_public_keys=payload,
+            ed25519_key_id="2026",
+        )
+    )
+    assert inline.key_set.active_key_id == "2026"
+    assert inline.verify_record("evidence", {"a": 1}, signature) == (True, "ok")
+    with pytest.raises(SecurityError):
+        inline.sign_record("evidence", {"a": 2})
+
+    path = tmp_path / "trusted_keys.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    from_file = build_signer(
+        Settings(
+            signing_mode="ed25519",
+            ed25519_public_keys_file=path,
+            ed25519_key_id="2025",
+        )
+    )
+    assert from_file.key_set.active_key_id == "2025"
+    assert from_file.verify_record("evidence", {"a": 1}, signature)[0] is True
+
+    with pytest.raises(SecurityError):
+        PublicKeySet({})
+
+
+def test_signing_nodes_fail_closed_when_active_kid_is_not_trusted():
+    private, _public = keypair()
+    _, other_public = keypair()
+
+    mismatched = Settings(
+        signing_mode="ed25519",
+        ed25519_private_key=private_key_pem(private),
+        ed25519_public_keys={"2026": public_key_hex(other_public)},
+        ed25519_key_id="2026",
+    )
+    with pytest.raises(SecurityError, match="does not match the trusted public key"):
+        build_signer(mismatched)
+
+    with pytest.raises(SecurityError, match="not in the trusted key set"):
+        build_signer(
+            Settings(
+                signing_mode="ed25519",
+                ed25519_public_keys={"2025": public_key_hex(other_public)},
+                ed25519_key_id="2026",
+                kms_sign_url="https://kms.invalid/sign",
+            )
+        )
+
+
+def test_kms_rejects_a_key_id_that_is_not_in_the_trust_bundle(monkeypatch):
+    import httpx
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"signature": "ab" * 64, "key_id": "rogue"}
+
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: FakeResponse())
+    sign = kms_http_signer("https://kms.invalid/sign", allowed_key_ids={"2026"})
+    with pytest.raises(SecurityError, match="untrusted key_id"):
+        sign(b"payload")
+
+
+def test_capability_card_signed_by_retired_key_still_verifies(tmp_path: Path):
+    old_private, old_public = keypair()
+    _, new_public = keypair()
+    cards = tmp_path / "subsystems.yaml"
+    cards.write_text("subsystems: []\n", encoding="utf-8")
+    signature = sign_file(old_private, cards)
+
+    settings = Settings(
+        signing_mode="ed25519",
+        ed25519_public_keys={
+            "2025": public_key_hex(old_public),
+            "2026": public_key_hex(new_public),
+        },
+        ed25519_key_id="2026",
+        subsystems_signature_ed25519=signature,
+        require_subsystems_integrity=True,
+    )
+    assert verify_subsystems_file(cards, settings)
+
+    new_only = Settings(
+        signing_mode="ed25519",
+        ed25519_public_keys={"2026": public_key_hex(new_public)},
+        ed25519_key_id="2026",
+        subsystems_signature_ed25519=signature,
+    )
+    with pytest.raises(SecurityError, match="Ed25519 signature verification failed"):
+        verify_subsystems_file(cards, new_only)
+
+
+def test_evidence_chain_from_two_signing_keys_verifies_with_the_keyset(tmp_path: Path):
+    old_private, old_public = keypair()
+    new_private, new_public = keypair()
+    path = tmp_path / "chain.jsonl"
+
+    async def run():
+        first = EvidenceChain(path, signer=Ed25519Signer(old_private, key_id="2025"))
+        await first.append(kind="test", actor="oekp", subsystem="oekp", data={"era": "old"})
+        keyset = PublicKeySet(
+            {"2025": old_public, "2026": new_public}, active_key_id="2026"
+        )
+        # The writer needs the same trust bundle to verify the existing chain
+        # on load, while signing new records with the active key.
+        second = EvidenceChain(
+            path, signer=Ed25519Signer(new_private, key_id="2026", key_set=keyset)
+        )
+        await second.append(kind="test", actor="oekp", subsystem="oekp", data={"era": "new"})
+        return EvidenceChain(path, signer=Ed25519Verifier(keyset)).verify()
+
+    ok, detail = asyncio.run(run())
+    assert ok, detail
+
+
+def test_keygen_can_write_a_keyset_bundle(tmp_path: Path):
+    from agents.__main__ import cmd_keygen
+
+    private_path = tmp_path / "keys" / "private.pem"
+    public_path = tmp_path / "keys" / "public.hex"
+    keyset_path = tmp_path / "trust" / "keys.json"
+    assert (
+        cmd_keygen(
+            argparse.Namespace(
+                private_key_file=str(private_path),
+                public_key_file=str(public_path),
+                key_id="2026",
+                keyset_file=str(keyset_path),
+            )
+        )
+        == 0
+    )
+    assert json.loads(keyset_path.read_text(encoding="utf-8")).keys() == {"2026"}
+

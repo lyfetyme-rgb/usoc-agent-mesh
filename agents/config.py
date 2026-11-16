@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     ed25519_private_key_file: Path | None = None
     ed25519_public_key: str | None = None
     ed25519_public_key_file: Path | None = None
+    # Trusted verification keyset: {kid: hex_or_pem_public_key}. Accepts a JSON
+    # object in the env var or a mounted JSON file. Multiple kids allow key
+    # rotation without breaking in-flight waves or historical evidence checks.
+    ed25519_public_keys: dict[str, str] | None = None
+    ed25519_public_keys_file: Path | None = None
     ed25519_key_id: str = "default"
     # KMS/sidecar signing endpoint; the private key never enters this process.
     kms_sign_url: str | None = None
@@ -198,15 +203,18 @@ def verify_subsystems_file(path: str | Path, settings: Settings | None = None) -
             )
 
     if expected_ed25519:
-        from .asymmetric import configured_public_key, load_private_key, verify_bytes
+        from .asymmetric import configured_key_set, load_private_key
 
         private_key = None
         if settings.ed25519_private_key or settings.ed25519_private_key_file:
             private_key = load_private_key(
                 settings.ed25519_private_key, settings.ed25519_private_key_file
             )
-        public_key = configured_public_key(settings, private_key=private_key)
-        if not verify_bytes(public_key, data, expected_ed25519):
+        key_set = configured_key_set(settings, private_key=private_key)
+        # A capability card signed by a retired key still verifies while that
+        # key remains in the trust bundle.
+        ok, _kid = key_set.verify_bytes(data, expected_ed25519)
+        if not ok:
             raise SecurityError(
                 "subsystems file Ed25519 signature verification failed"
             )

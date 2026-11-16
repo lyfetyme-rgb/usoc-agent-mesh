@@ -620,6 +620,8 @@ def cmd_integrity(args: argparse.Namespace) -> int:
 
 
 def cmd_keygen(args: argparse.Namespace) -> int:
+    import json
+
     from .asymmetric import fingerprint, generate_keypair, private_key_pem, public_key_hex
     from .security import secure_dir, secure_file
 
@@ -634,6 +636,17 @@ def cmd_keygen(args: argparse.Namespace) -> int:
     secure_file(public_path)
     print(f"private key: {private_path}  (offline only; never mount on a runtime node)")
     print(f"public key:  {public_path}")
+
+    keyset_file = getattr(args, "keyset_file", None)
+    if keyset_file:
+        path = Path(keyset_file)
+        secure_dir(path.parent)
+        path.write_text(
+            json.dumps({args.key_id: public_key_hex(public_key)}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        secure_file(path)
+        print(f"keyset:      {path} (kid={args.key_id})")
     print(f"fingerprint: {fingerprint(public_key)}")
     return 0
 
@@ -673,6 +686,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     keygen.add_argument(
         "--public-key-file", default="trust/ed25519_public.hex", help="runtime public key path"
+    )
+    keygen.add_argument(
+        "--key-id", default="default", help="kid used in the trust bundle and for signing"
+    )
+    keygen.add_argument(
+        "--keyset-file", help="also write a JSON {kid: public_key} trust bundle for runtime"
     )
     sign_config = sub.add_parser(
         "sign-config", help="sign subsystems.yaml with an offline Ed25519 private key"

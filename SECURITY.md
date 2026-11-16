@@ -45,11 +45,13 @@ verification key.
 
 Key custody:
 
-* CI/CD or a KMS holds the private key. Runtime nodes mount
-  `AGENT_ED25519_PUBLIC_KEY` or `AGENT_ED25519_PUBLIC_KEY_FILE` only.
+* CI/CD or a KMS holds the private key. Runtime nodes mount public keys only,
+  either as `AGENT_ED25519_PUBLIC_KEY(_FILE)` or, preferably, as a **trust
+  bundle** in `AGENT_ED25519_PUBLIC_KEYS` / `AGENT_ED25519_PUBLIC_KEYS_FILE`.
 * `python -m agents keygen` generates a PKCS#8 private key (`secrets/`) and a raw
-  hex public key (`trust/`). `AGENT_ED25519_KEY_ID` labels the key in logs and
-  rotation records.
+  hex public key (`trust/`). Use `--key-id` and `--keyset-file` to write a
+  `{kid: public_key}` bundle directly. `AGENT_ED25519_KEY_ID` selects the active
+  signing key and labels it in logs and rotation records.
 * With only a public key, the runtime is **verification-only**: it validates
   messages, approvals and evidence but refuses to sign, so an audit/read-only
   node cannot mint records.
@@ -65,13 +67,24 @@ Capability cards use a detached signature produced in CI:
 
 ```bash
 python -m agents keygen --private-key-file secrets/ed25519_private.pem \
-  --public-key-file trust/ed25519_public.hex
+  --public-key-file trust/ed25519_public.hex \
+  --key-id usoc-2026-11 --keyset-file trust/ed25519_keys.json
 python -m agents sign-config --key-file secrets/ed25519_private.pem
 # runtime:
 AGENT_SIGNING_MODE=ed25519
-AGENT_ED25519_PUBLIC_KEY_FILE=/etc/usoc/ed25519_public.hex
+AGENT_ED25519_PUBLIC_KEYS_FILE=/etc/usoc/ed25519_keys.json
+AGENT_ED25519_KEY_ID=usoc-2026-11
 AGENT_SUBSYSTEMS_SIGNATURE_FILE=/etc/usoc/subsystems.yaml.sig
 AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true
+```
+
+The bundle is a JSON object mapping key ids to hex (or PEM) public keys:
+
+```json
+{
+  "usoc-2025-06": "3b4c...",
+  "usoc-2026-11": "9f21..."
+}
 ```
 
 Startup verifies the exact file bytes against the detached signature before
@@ -79,11 +92,28 @@ parsing any capability card. Ed25519 signatures cover a domain-separated
 envelope (`scope`, `identity`, canonical body), so a signature cannot be
 replayed from one purpose or sender into another.
 
-Rotation: publish the new public key and key id to runtime nodes, then switch
-the signer. HMAC-signed records are not valid in Ed25519 mode (and vice versa),
-so rotate during a maintenance window or run a verifier that trusts the old key
-while it drains. A multi-key trust bundle is the next step for zero-downtime
-rotation.
+#### Zero-downtime rotation with a trust bundle
+
+Every node verifies against **all** keys in the bundle, not just the active one.
+Signatures do not carry a key id, so the verifier tries each trusted key until
+one matches. That keeps in-flight waves and historical OEKP evidence valid
+while a retired key remains in the bundle.
+
+1. Generate the new keypair offline with a fresh `--key-id`.
+2. Add the new public key to `ed25519_keys.json` (keep the old one). Deploy the
+   updated bundle to every runtime node and confirm they are healthy. Both keys
+   are now trusted, so records signed by either verify.
+3. Switch the signer: set `AGENT_ED25519_KEY_ID` to the new kid and point the
+   KMS/signing job at the new private key. New records use the new key while
+   older records still verify.
+4. After all in-flight waves have drained and no stored evidence, approvals, or
+   capability-card signatures need the old key, remove it from the bundle and
+   redeploy. Removing it too early breaks verification of those records.
+
+A signing node fails closed if `AGENT_ED25519_KEY_ID` is absent from the bundle,
+if a local private key does not match its public entry, or if the KMS returns a
+`key_id` that is not trusted. HMAC-signed records are not valid in Ed25519 mode
+(and vice versa), so switching *modes* still needs a maintenance window.
 
 ### Approval integrity
 
@@ -202,7 +232,9 @@ Pin the exact bytes with one or more of:
   `AGENT_SHARED_SECRET`.
 * `AGENT_SUBSYSTEMS_SIGNATURE_ED25519` or `AGENT_SUBSYSTEMS_SIGNATURE_FILE` —
   detached Ed25519 signature produced offline in CI/CD. Runtime verifies it
-  with `AGENT_ED25519_PUBLIC_KEY(_FILE)` and never needs the private key.
+  with the trusted key bundle (`AGENT_ED25519_PUBLIC_KEYS(_FILE)`) or a single
+  `AGENT_ED25519_PUBLIC_KEY(_FILE)`, and never needs the private key. A card
+  signed by a retired key keeps verifying while that key remains in the bundle.
 
 Generate the values with `python -m agents integrity` (HMAC) or
 `python -m agents sign-config` (Ed25519), or verify a deployment with
