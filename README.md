@@ -22,7 +22,7 @@ cards so the full surface is visible and routable. See
   +-------+-------+-------+-------+--+----+-------+-------+-------+
   |       |       |       |       |       |       |       |       |
  AICEE   ACIE  SERAPHIM COHESION BENGAL CSSSF   OEKP  CYBER    HITL
- (14)    (10)    (12)      (9)     (9)   (10)    (8)   STRIKE   (10)
+ (14)    (10)    (12)      (9)     (9)   (10)    (8)   DEFENSE   (10)
                                                         (11)
   +-------+-------+-------+-------+-------+-------+-------+-------+
                     peer-to-peer delegate() / ask()
@@ -38,7 +38,7 @@ python -m agents demo            # one governed goal end to end
 python -m agents health          # SHELL health + diagnostics
 python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
-python -m pytest -q              # 119 tests, no network
+python -m pytest -q              # 176 tests, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
@@ -51,6 +51,37 @@ acie -> aicee -> seraphim -> oekp
 
 The output shows the policy reference and evidence id produced by the governed
 steps, the full message flow, and runtime metrics.
+
+## 3-minute demo storyboard (testing-bay)
+
+Live smoke test — **PASS**, 2026-11-16, `testing-bay.atlassian.net`
+(cloudId `a1a0914e-e3aa-4080-a0fb-a67dec49c1a3`): the decision ADR page
+`786434` is `current` at version 3, and Jira project `KAN` returns four issues
+(KAN-2 **Done**, KAN-1/3/4 **To Do**). No live publisher write is performed —
+the bridge is opt-in and its tests use an injected HTTP transport.
+
+| Time | Show | Point |
+|---|---|---|
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Three commits: offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge. Clean remote, 176 tests passing. |
+| 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
+| 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
+| 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |
+| 2:20–3:00 | `python -m agents approve apr-… --by alice` then `python -m agents publish-decision apr-…` | A human decision creates a mesh-signed ADR (and JSM ticket when configured), idempotently. No AI recommendation can write externally. |
+
+To make the last beat live rather than narrated, configure the opt-in bridge:
+
+```powershell
+$env:AGENT_ATLASSIAN_BRIDGE = "true"
+$env:AGENT_ATLASSIAN_BASE_URL = "https://testing-bay.atlassian.net"
+$env:AGENT_ATLASSIAN_API_KEY_FILE = "/run/secrets/atlassian_api_key"
+$env:AGENT_ATLASSIAN_CONFLUENCE_SPACE_KEY = "SD"
+$env:AGENT_ATLASSIAN_JSM_ENABLED = "false"   # no JSM desk exists on this site yet
+```
+
+The service-account key must be mounted as a secret; never paste it into
+configuration or chat. See
+[SECURITY.md](SECURITY.md#atlassian-publishing-bridge-opt-in) for the write gate,
+rotation procedure and verified SSRF/XSS properties.
 
 ## The nine subsystems
 
