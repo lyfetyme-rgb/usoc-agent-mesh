@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 from pathlib import Path
@@ -178,6 +179,26 @@ def test_jsm_disabled_skips_ticket_creation(tmp_path: Path):
     result = bridge.publish_decision(approval, {"seq": 1, "hash": "x"})
     assert result.jsm_key is None
     assert [c[0] for c in transport.calls] == ["GET", "POST"]
+
+
+def test_publish_decision_cli_fails_cleanly_when_bridge_is_disabled(
+    tmp_path: Path, capsys, monkeypatch
+):
+    from agents.__main__ import cmd_publish_decision
+    from agents.config import get_settings
+
+    get_settings.cache_clear()  # get_settings() is process-cached; honour the env
+    monkeypatch.setenv("AGENT_SHARED_SECRET", "test-secret-that-is-long-enough-32")
+    signer = Signer("test-secret-that-is-long-enough-32")
+    req = decided_approval(tmp_path / "ws", signer)
+    args = argparse.Namespace(
+        approval_id=req.id,
+        registry=None,
+        workspace=str(tmp_path / "ws"),
+        json_logs=False,
+    )
+    assert cmd_publish_decision(args) == 1
+    assert "bridge is disabled" in capsys.readouterr().out
 
 
 def test_existing_page_is_updated_with_a_new_version(tmp_path: Path):

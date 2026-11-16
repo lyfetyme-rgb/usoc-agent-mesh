@@ -12,7 +12,7 @@ recommendation or pending approval can create an external record. The whole
 envelope is signed with the mesh signer under its own scope, which lets a reader
 verify that the published ADR is the one the mesh decided.
 
-Nothing happens unless ``AGENT_ATLASSIAN_BRIDGE=true`` and complete
+Nothing happens unless ``AGENT_ATLASSIAN_BRIDGE_ENABLED=true`` and complete
 configuration is present. Credentials come from env or a mounted file; they are
 never stored in config. HTTP calls are injected as a transport so tests never
 touch the network.

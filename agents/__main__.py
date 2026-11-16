@@ -228,6 +228,10 @@ def cmd_publish_decision(args: argparse.Namespace) -> int:
         )
         seq, digest = chain.head
         bridge = build_bridge(settings, signer)
+        if bridge is None:
+            raise ValueError(
+                "Atlassian bridge is disabled; set AGENT_ATLASSIAN_BRIDGE_ENABLED=true"
+            )
         return bridge.publish_decision(req, {"seq": seq, "hash": digest})
 
     try:

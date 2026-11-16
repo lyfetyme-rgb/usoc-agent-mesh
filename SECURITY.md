@@ -152,7 +152,7 @@ BENGAL independently verifies the chain.
 ### Atlassian publishing bridge (opt-in)
 
 `agents/atlassian_bridge.py` is the only outward publishing path for governed
-decisions. It is **disabled by default** (`AGENT_ATLASSIAN_BRIDGE=false`). When
+decisions. It is **disabled by default** (`AGENT_ATLASSIAN_BRIDGE_ENABLED=false`). When
 enabled, `agents approve` / `agents deny` publish *after* the decision is
 persisted and appended to evidence:
 
@@ -171,7 +171,7 @@ Configuration (a Bearer service-account key is recommended over a personal
 token; the value always comes from env or a mounted file, never from config):
 
 ```bash
-AGENT_ATLASSIAN_BRIDGE=true
+AGENT_ATLASSIAN_BRIDGE_ENABLED=true
 AGENT_ATLASSIAN_BASE_URL=https://testing-bay.atlassian.net
 AGENT_ATLASSIAN_API_KEY_FILE=/run/secrets/atlassian_api_key
 AGENT_ATLASSIAN_CONFLUENCE_SPACE_KEY=SD
