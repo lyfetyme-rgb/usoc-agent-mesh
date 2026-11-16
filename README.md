@@ -83,6 +83,9 @@ configuration or chat. See
 [SECURITY.md](SECURITY.md#atlassian-publishing-bridge-opt-in) for the write gate,
 rotation procedure and verified SSRF/XSS properties.
 
+The build-to-demo order, the non-negotiable rules, and what "done" means are
+pinned in [PLAYBOOK.md](PLAYBOOK.md).
+
 ## The nine subsystems
 
 | id | roles | job |
