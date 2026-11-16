@@ -186,6 +186,29 @@ No AI recommendation can publish — publication requires an already-decided
 approval with an approver identity and timestamp. The publishing tests use an
 injected HTTP transport, so no live Atlassian writes occur in CI.
 
+#### Verified write-gate and outbound-request properties
+
+* **Write gate.** `publish-decision` loads the approval through
+  `FileApprovalStore`, which verifies the signature of every persisted record
+  on load. An attacker who edits the approval JSON on disk has that record
+  dropped rather than published. The `approve`/`deny` path likewise publishes
+  only a freshly signed, already-decided record. This guarantee requires
+  signing to be enabled: `AGENT_MESSAGE_AUTH=false` makes `build_signer()`
+  return `None`, in which case `FileApprovalStore` skips verification. Keep
+  signing on in every environment that has the bridge enabled.
+* **Outbound requests.** `AGENT_ATLASSIAN_BASE_URL` must use `https://`; every
+  API path is a fixed string literal (`/wiki/rest/api/content`,
+  `/rest/servicedeskapi/request`). The only dynamic path segment is a page id
+  returned by Atlassian itself, never approval data. Approval-controlled
+  values stay inside JSON payloads, and ADR markdown plus the serialized
+  envelope are HTML-escaped before entering Confluence `<pre>` storage blocks,
+  so neither path traversal nor stored XSS is reachable from an approval
+  record. `httpx.request` does not follow redirects by default.
+* **Trust boundary.** The base URL is operator-controlled configuration, not
+  untrusted input; there is no separate host allowlist. Treat
+  `AGENT_ATLASSIAN_BASE_URL` and the mounted API key as sensitive deployment
+  configuration.
+
 ### Secrets
 
 * Prefer `AGENT_SHARED_SECRET_FILE` and `AGENT_HEALTH_TOKEN_FILE` over inline
