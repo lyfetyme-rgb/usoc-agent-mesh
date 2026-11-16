@@ -29,9 +29,96 @@ from .security import Signer
 
 STREAM_PREFIX = "mesh:"
 
+# Wildcards are control-plane conveniences, not domain-agent features. Only the
+# orchestrator may publish with a pattern, and only the audit sink may subscribe
+# to a topic.* pattern. Everyone else must enumerate exact topics.
+CONTROL_PLANE_AGENTS = frozenset({"orchestrator"})
+AUDIT_SINK_AGENTS = frozenset({"oekp"})
+WILDCARD_CHARS = ("*", "?", "[")
+
 
 class ConfigurationError(ValueError):
     """Raised when the bus is constructed without required ACL configuration."""
+
+
+def has_wildcard(pattern: str) -> bool:
+    return any(char in pattern for char in WILDCARD_CHARS)
+
+
+def validate_topic_acls(
+    *,
+    publish_acl: dict[str, list[str]] | None,
+    subscribe_acl: dict[str, list[str]] | None,
+    signer: Signer | None,
+    control_agents: frozenset[str] = CONTROL_PLANE_AGENTS,
+    audit_sinks: frozenset[str] = AUDIT_SINK_AGENTS,
+) -> None:
+    """Reject wildcard ACLs that would defeat least-privilege routing.
+
+    Rules:
+    * A domain agent may not publish to a pattern (it would reach arbitrary
+      inboxes/topics). Only control-plane identities may use publish patterns.
+    * A domain agent may not subscribe to a pattern. Only the audit sink may,
+      and only under ``topic.*``.
+    * An audit-sink wildcard requires message authentication: an unauthenticated
+      sink must never be able to observe every broadcast.
+    """
+    for agent, patterns in (publish_acl or {}).items():
+        for pattern in patterns:
+            if has_wildcard(pattern) and agent not in control_agents:
+                raise ConfigurationError(
+                    f"agent {agent!r} may not use a wildcard publish pattern "
+                    f"({pattern!r}); enumerate exact topics"
+                )
+
+    wildcard_subscription = False
+    for agent, patterns in (subscribe_acl or {}).items():
+        for pattern in patterns:
+            if not has_wildcard(pattern):
+                continue
+            wildcard_subscription = True
+            if agent not in audit_sinks:
+                raise ConfigurationError(
+                    f"agent {agent!r} may not use a wildcard subscribe pattern "
+                    f"({pattern!r}); only audit sinks may subscribe broadly"
+                )
+            if not pattern.startswith("topic."):
+                raise ConfigurationError(
+                    f"audit sink {agent!r} wildcard subscription must be scoped "
+                    f"to topic.* (got {pattern!r})"
+                )
+    if wildcard_subscription and signer is None:
+        raise ConfigurationError(
+            "wildcard audit subscriptions require message authentication; "
+            "configure AGENT_SHARED_SECRET or disable the wildcard subscription"
+        )
+
+
+def acls_from_specs(
+    specs: list[Any],
+    *,
+    control_agents: frozenset[str] = CONTROL_PLANE_AGENTS,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Build least-privilege topic ACLs from capability cards.
+
+    Domain agents may publish only to exact ``inbox.<recipient>`` topics they
+    are authorized for (their declared recipients plus the control plane), and
+    subscribe only to the exact topics on their card. The control plane may
+    publish to every subsystem inbox plus its own plan/goal event topics.
+    """
+    ids = {str(spec.id) for spec in specs}
+    publish: dict[str, list[str]] = {}
+    subscribe: dict[str, list[str]] = {}
+    for spec in specs:
+        recipients = {str(r) for r in (getattr(spec, "allowed_recipients", None) or [])}
+        recipients |= control_agents
+        topics = {f"inbox.{r}" for r in recipients if r in ids or r in control_agents}
+        publish[str(spec.id)] = sorted(topics)
+        subscribe[str(spec.id)] = [str(t) for t in (getattr(spec, "subscribes", None) or [])]
+    for control in control_agents:
+        publish[control] = sorted({f"inbox.{agent}" for agent in ids | {control}} | {"topic.plan", "topic.goal"})
+        subscribe.setdefault(control, [])
+    return publish, subscribe
 
 
 @runtime_checkable
@@ -81,9 +168,12 @@ class InMemoryBus:
         self.publish_acl = publish_acl
         self.subscribe_acl = subscribe_acl
         self.insecure_dev_mode = insecure_dev_mode
-        # When True and no ACL is supplied, fall back to allow-all (dev/test only).
-        self.insecure_dev_mode = insecure_dev_mode
         self.sender_verifier = sender_verifier
+        validate_topic_acls(
+            publish_acl=publish_acl,
+            subscribe_acl=subscribe_acl,
+            signer=signer,
+        )
         self.history: list[Message] = []
         self.dlq: list[Message] = []
         self.stats: dict[str, int] = defaultdict(int)
@@ -95,6 +185,11 @@ class InMemoryBus:
         else:
             allowed = self.subscribe_acl.get(agent, [])
             for t in topics:
+                if has_wildcard(t) and agent not in AUDIT_SINK_AGENTS:
+                    raise PermissionError(
+                        f"{agent} may not subscribe to wildcard topic {t!r}; "
+                        "only audit sinks may subscribe broadly"
+                    )
                 if not any(fnmatchcase(t, p) for p in allowed):
                     raise PermissionError(f"{agent} is not allowed to subscribe to {t}")
         if agent not in self._queues:
@@ -110,6 +205,8 @@ class InMemoryBus:
             self.stats["sender_rejected"] = self.stats.get("sender_rejected", 0) + 1
             log("bus.sender_rejected", sender=msg.sender, topic=msg.topic)
             raise PermissionError(f"sender {msg.sender} failed identity verification")
+        if has_wildcard(msg.topic):
+            raise PermissionError("publish topic must be concrete, not a wildcard pattern")
         if self.publish_acl is None:
             if not self.insecure_dev_mode:
                 self.stats["acl_denied"] += 1
@@ -233,6 +330,11 @@ class RedisBus:
         self.subscribe_acl = subscribe_acl
         self.insecure_dev_mode = insecure_dev_mode
         self.sender_verifier = sender_verifier
+        validate_topic_acls(
+            publish_acl=publish_acl,
+            subscribe_acl=subscribe_acl,
+            signer=signer,
+        )
         self._history: list[Message] = []
         self.stats: dict[str, int] = defaultdict(int)
         self.dlq_stream = f"{STREAM_PREFIX}dlq"
@@ -251,6 +353,11 @@ class RedisBus:
         else:
             allowed = self.subscribe_acl.get(agent, [])
             for t in topics:
+                if has_wildcard(t) and agent not in AUDIT_SINK_AGENTS:
+                    raise PermissionError(
+                        f"{agent} may not subscribe to wildcard topic {t!r}; "
+                        "only audit sinks may subscribe broadly"
+                    )
                 if not any(fnmatchcase(t, p) for p in allowed):
                     raise PermissionError(f"{agent} is not allowed to subscribe to {t}")
         streams = [self._stream(f"inbox.{agent}")]
@@ -275,6 +382,8 @@ class RedisBus:
             self.stats["sender_rejected"] = self.stats.get("sender_rejected", 0) + 1
             log("bus.sender_rejected", sender=msg.sender, topic=msg.topic)
             raise PermissionError(f"sender {msg.sender} failed identity verification")
+        if has_wildcard(msg.topic):
+            raise PermissionError("publish topic must be concrete, not a wildcard pattern")
         if self.publish_acl is None:
             if not self.insecure_dev_mode:
                 self.stats["acl_denied"] += 1

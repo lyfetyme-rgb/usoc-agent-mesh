@@ -4,11 +4,15 @@ There is deliberately no work submission over HTTP. The mesh accepts work over
 the authenticated bus, so this server can be small, read-only, and easy to
 reason about:
 
-    GET /health   liveness  -> 200 while the process is running
-    GET /ready    readiness -> 200 only when agents and transport are healthy
+    GET /health       liveness  -> public counts and flags only
+    GET /ready        readiness -> public 200/503, counts only
+    GET /diagnostics  admin     -> topology and issues, admin token required
 
-Optional bearer auth (``AGENT_HEALTH_TOKEN``) protects both routes. Responses
-never include secrets; only counts and status flags.
+``AGENT_HEALTH_TOKEN`` optionally protects /health and /ready. Diagnostics is a
+separate administrative surface: it returns topology and issue detail, so it is
+only served when ``AGENT_ADMIN_TOKEN`` (or its file) is configured, and it is
+hidden entirely otherwise. Public responses never include agent ids, internal
+endpoints, configuration errors, or secret values.
 """
 
 from __future__ import annotations
@@ -38,11 +42,13 @@ class HealthServer:
         provider: Provider,
         *,
         token: str | None = None,
+        admin_token: str | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.provider = provider
         self.token = token
+        self.admin_token = admin_token
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
@@ -105,17 +111,29 @@ class HealthServer:
                 key, value = line.split(":", 1)
                 headers[key.strip().lower()] = value.strip()
 
-        if self.token is not None:
-            supplied = headers.get("authorization", "")
-            expected = f"Bearer {self.token}"
-            if not hmac.compare_digest(
-                supplied.encode("latin-1", "ignore"), expected.encode("latin-1")
-            ):
-                return 401, {"error": "unauthorized"}
-
         if method not in ("GET", "HEAD"):
             return 405, {"error": "method not allowed"}
         path = target.split("?", 1)[0]
-        if path not in ("/health", "/ready"):
+
+        # Diagnostics exposes topology, so it is a separate admin surface. If
+        # no admin token is configured the route does not exist (fail closed).
+        if path == "/diagnostics":
+            if self.admin_token is None:
+                return 404, {"error": "not found"}
+            if not self._authorized(headers, self.admin_token):
+                return 401, {"error": "unauthorized"}
+        elif self.token is not None:
+            if not self._authorized(headers, self.token):
+                return 401, {"error": "unauthorized"}
+
+        if path not in ("/health", "/ready", "/diagnostics"):
             return 404, {"error": "not found"}
         return await self.provider(path)
+
+    @staticmethod
+    def _authorized(headers: dict[str, str], token: str) -> bool:
+        supplied = headers.get("authorization", "")
+        expected = f"Bearer {token}"
+        return hmac.compare_digest(
+            supplied.encode("latin-1", "ignore"), expected.encode("latin-1")
+        )

@@ -168,10 +168,18 @@ def load_registry(
     path: str | Path,
     tools: ToolRegistry,
     expected_count: int | None = EXPECTED_SUBSYSTEMS,
+    *,
+    settings: Any = None,
 ) -> Registry:
     file = Path(path)
     if not file.is_file():
         raise RegistryError(f"subsystems file not found: {file}")
+    if settings is not None:
+        # Capability cards are the IAM policy store. Verify the pinned manifest
+        # before parsing so a runtime edit cannot grant new tools or topics.
+        from .config import verify_subsystems_file
+
+        verify_subsystems_file(file, settings)
     try:
         raw: dict[str, Any] = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:

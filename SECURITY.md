@@ -119,13 +119,43 @@ another.
 * Redis is on an internal Compose network; only the health port is published,
   and it binds to `127.0.0.1` by default.
 
-### Health endpoint
+### Health and diagnostics endpoints
 
-`GET /health` (liveness) and `GET /ready` (readiness) are the only HTTP routes.
-There is no work submission over HTTP. When `AGENT_HEALTH_TOKEN` or
+`GET /health` (liveness) and `GET /ready` (readiness) are the public-safe HTTP
+routes. There is no work submission over HTTP. When `AGENT_HEALTH_TOKEN` or
 `AGENT_HEALTH_TOKEN_FILE` is set, both routes require
-`Authorization: Bearer <token>`; comparisons are constant-time. Responses
-contain counts and status flags only.
+`Authorization: Bearer <token>`; comparisons are constant-time.
+
+Public responses are deliberately minimal: counts and status flags only. They
+never include agent ids, internal bus endpoints, topology, configuration error
+text, or secret values.
+
+`GET /diagnostics` is a separate administrative surface. It returns topology,
+per-agent detail and issue text, so it is only served when
+`AGENT_ADMIN_TOKEN`/`AGENT_ADMIN_TOKEN_FILE` is configured; without an admin
+token the route returns `404`. It requires its own `Authorization: Bearer`
+token, and startup refuses a configuration where the admin token equals the
+health token. Every diagnostics payload is passed through the redaction helpers,
+so connection strings such as `redis://user:password@host` are masked even on
+the authenticated route.
+
+### Capability card integrity
+
+`subsystems.yaml` is the IAM policy store for the mesh: it decides which tools,
+recipients, senders, action classes and topics each subsystem may use. A runtime
+edit is a privilege escalation, so startup verifies the file before parsing it
+(`config.verify_subsystems_file`, called by `load_registry`).
+
+Pin the exact bytes with one or both of:
+
+* `AGENT_SUBSYSTEMS_MANIFEST_HASH` — SHA-256 of the file.
+* `AGENT_SUBSYSTEMS_SIGNATURE` — HMAC-SHA256 over the file bytes keyed with
+  `AGENT_SHARED_SECRET`.
+
+Generate the values with `python -m agents integrity`, or verify a deployment
+with `python -m agents integrity --check`. Set
+`AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true` in production so a missing pin fails
+closed instead of trusting the file on disk.
 
 ### SHELL infrastructure boundary
 
@@ -169,6 +199,23 @@ undeclared recipient, action class or target raises `AgentError` / returns a
 policy DENY before any work runs. With no matrix declared (the default for
 existing cards) behaviour is unchanged, so scoping is opt-in and backward
 compatible.
+
+### Topic ACLs and wildcards
+
+The mesh derives bus ACLs from the capability cards at startup. A domain agent
+may publish only to the exact `inbox.<recipient>` topics it is authorized for
+(declared recipients plus the control plane), and may subscribe only to the
+exact topics on its card. Wildcards are control-plane conveniences:
+
+* Only `orchestrator` may use a wildcard **publish** rule.
+* Only the audit sink (`oekp`) may subscribe to a wildcard, and only under
+  `topic.*`.
+* A wildcard audit subscription requires message authentication; an
+  unauthenticated sink cannot be configured to observe every broadcast.
+* Publishing to a wildcard topic (for example `topic.*`) is rejected.
+
+`bus.validate_topic_acls` enforces these rules at construction time, and the
+subscribe/publish paths re-check wildcard requests at runtime.
 
 ### Read-only connectors and correlation
 
@@ -224,6 +271,10 @@ docker compose --env-file .env.docker down
 - [ ] `AGENT_BUS=redis` and a password-protected Redis URL.
 - [ ] `AGENT_SHARED_SECRET_FILE` points at a mounted secret of at least 32 chars.
 - [ ] `AGENT_REQUIRE_APPROVER_ALLOWLIST=true` and `AGENT_APPROVERS` names real humans.
+- [ ] `AGENT_SUBSYSTEMS_MANIFEST_HASH` or `AGENT_SUBSYSTEMS_SIGNATURE` is pinned and
+      `AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true`.
+- [ ] `AGENT_ADMIN_TOKEN_FILE` is mounted if `/diagnostics` is needed, and it is
+      distinct from the health token.
 - [ ] `AGENT_ALLOWED_TARGETS` is as narrow as the mission allows.
 - [ ] `AGENT_CONNECTOR_ALLOWED_HOSTS` lists only the incumbent APIs in use, and
       `AGENT_CONNECTORS_FILE` points at a reviewed mapping.

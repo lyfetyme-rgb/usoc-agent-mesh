@@ -48,6 +48,12 @@ services:
       AGENT_HEALTH_TOKEN_FILE: /run/secrets/health_token
       AGENT_HEALTH_HOST: 0.0.0.0
       AGENT_HEALTH_PORT: "8080"
+      # Optional: expose the admin-only /diagnostics route. Mount a separate
+      # secret file and keep it distinct from the health token.
+      # AGENT_ADMIN_TOKEN_FILE: /run/secrets/admin_token
+      # Pin the capability cards; generate with `python -m agents integrity`.
+      # AGENT_SUBSYSTEMS_MANIFEST_HASH: ${AGENT_SUBSYSTEMS_MANIFEST_HASH:-}
+      # AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY: "true"
       # Fail closed if the deployment forgets to name its approvers.
       AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
       AGENT_APPROVERS: ${AGENT_APPROVERS:?set AGENT_APPROVERS in .env.docker}

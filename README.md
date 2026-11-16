@@ -360,7 +360,9 @@ just a laptop. The full threat model and deployment checklist are in
 | model transport | remote LLM endpoints must use TLS; loopback HTTP is allowed for local models |
 | cache isolation | idempotency keys are scoped by agent, sender, tenant and mission |
 | least privilege | workspace delete off by default; container runs non-root, read-only, with all capabilities dropped |
-| read-only service | `/health` and `/ready` only; no HTTP work submission; optional bearer token |
+| capability-card integrity | startup SHA-256/HMAC pin over `subsystems.yaml`; fail closed when `AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true` |
+| topic ACLs | exact inbox topics for domain agents; wildcard publish only for `orchestrator`; wildcard subscribe only for the authenticated `oekp` audit sink |
+| read-only service | `/health` and `/ready` only, counts-only and redacted; `/diagnostics` is admin-only and hidden without `AGENT_ADMIN_TOKEN` |
 
 ```powershell
 # Generate the cluster secret and health token.
@@ -372,6 +374,11 @@ $env:AGENT_BUS="redis"
 $env:AGENT_SHARED_SECRET="<the generated secret>"
 python -m agents serve --host 127.0.0.1 --port 8080
 python -m agents probe --url http://127.0.0.1:8080/ready
+
+# Pin the capability cards before production startup.
+python -m agents integrity
+$env:AGENT_SUBSYSTEMS_MANIFEST_HASH="<sha256 from integrity>"
+$env:AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY="true"
 ```
 
 `AGENT_MESSAGE_AUTH=false` exists only for local debugging. Leave it on.
@@ -457,7 +464,7 @@ agents/
   tools.py         sandboxed workspace tools + evidence tools
   store.py         idempotency store
   mesh.py          composition root
-  __main__.py      CLI (demo, list, doctor, serve, probe, health, approvals)
+  __main__.py      CLI (demo, list, doctor, integrity, serve, probe, health, approvals)
 docs/architecture.md
 subsystems.yaml
 Dockerfile

@@ -22,6 +22,7 @@ from typing import Any
 from .contracts import SCHEMA_VERSION
 from .observability import Metrics
 from .registry import Registry
+from .security import redact_fields, redact_text
 
 
 class Shell:
@@ -74,30 +75,44 @@ class Shell:
             for spec in self.registry.subsystems
         ]
 
-    async def health(self) -> dict[str, Any]:
+    async def health(self, *, detailed: bool = True) -> dict[str, Any]:
         stats = getattr(self.bus, "stats", {}) or {}
         dlq = getattr(self.bus, "dlq", []) or []
         pending = await self.approvals.pending() if self.approvals is not None else []
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "bus": type(self.bus).__name__,
-            "agents": [
-                {"id": a.id, "uptime_s": a.uptime_s, "inflight": len(a._tasks)} for a in self.agents.values()
-            ],
-            "roles": self.registry.roles_total,
-            "metrics": self.metrics.snapshot(),
-            "transport": {
-                "published": stats.get("published", 0),
-                "delivered": stats.get("delivered", 0),
-                "dead_letters": len(dlq),
-                "unrouted": stats.get("unrouted", 0),
-            },
-            "pending_approvals": len(pending),
-            "message_auth": getattr(self.bus, "signer", None) is not None,
-            "fragmentation": self._fragmentation_status(),
-        }
+        if not detailed:
+            # Public liveness only: counts and flags, never topology, agent ids,
+            # internal endpoints, or configuration error text.
+            return {
+                "status": "ok",
+                "schema_version": SCHEMA_VERSION,
+                "agents_running": len(self.agents),
+                "agents_expected": len(self.registry.subsystems),
+                "message_auth": getattr(self.bus, "signer", None) is not None,
+                "pending_approvals": len(pending),
+            }
+        return redact_fields(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "bus": type(self.bus).__name__,
+                "agents": [
+                    {"id": a.id, "uptime_s": a.uptime_s, "inflight": len(a._tasks)}
+                    for a in self.agents.values()
+                ],
+                "roles": self.registry.roles_total,
+                "metrics": self.metrics.snapshot(),
+                "transport": {
+                    "published": stats.get("published", 0),
+                    "delivered": stats.get("delivered", 0),
+                    "dead_letters": len(dlq),
+                    "unrouted": stats.get("unrouted", 0),
+                },
+                "pending_approvals": len(pending),
+                "message_auth": getattr(self.bus, "signer", None) is not None,
+                "fragmentation": self._fragmentation_status(),
+            }
+        )
 
-    async def ready(self) -> tuple[bool, dict[str, Any]]:
+    async def ready(self, *, detailed: bool = True) -> tuple[bool, dict[str, Any]]:
         """Readiness for container probes: agents present and transport live."""
         missing = [spec.id for spec in self.registry.subsystems if spec.id not in self.agents]
         bus_ok = True
@@ -109,14 +124,24 @@ class Shell:
                 bus_ok = False
         pending = await self.approvals.pending() if self.approvals is not None else []
         ok = not missing and bus_ok
-        return ok, {
-            "ready": ok,
-            "missing_agents": missing,
-            "bus_ok": bus_ok,
-            "pending_approvals": len(pending),
-            "roles": self.registry.roles_total,
-            "fragmentation": self._fragmentation_status(),
-        }
+        if not detailed:
+            return ok, {
+                "ready": ok,
+                "agents_running": len(self.agents),
+                "agents_expected": len(self.registry.subsystems),
+                "bus_ok": bus_ok,
+                "pending_approvals": len(pending),
+            }
+        return ok, redact_fields(
+            {
+                "ready": ok,
+                "missing_agents": missing,
+                "bus_ok": bus_ok,
+                "pending_approvals": len(pending),
+                "roles": self.registry.roles_total,
+                "fragmentation": self._fragmentation_status(),
+            }
+        )
 
     async def diagnostics(self) -> list[str]:
         issues: list[str] = []
@@ -132,4 +157,4 @@ class Shell:
             issues.append(f"{len(await self.approvals.pending())} approvals waiting on a human")
         if self.fragmentation_error:
             issues.append(f"fragmentation disabled: {self.fragmentation_error}")
-        return issues
+        return [redact_text(issue) for issue in issues]

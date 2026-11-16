@@ -13,7 +13,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from .bus import Bus, build_bus
+from .bus import Bus, acls_from_specs, build_bus
 from .config import Settings, get_settings
 from .connectors import IngestResult, load_connectors
 from .contracts import GoalResult
@@ -91,15 +91,21 @@ class Mesh:
             self.evidence,
             allow_delete=self.settings.allow_workspace_delete,
         )
-        self.registry = load_registry(self._registry_path, tools)
+        self.registry = load_registry(self._registry_path, tools, settings=self.settings)
         if self._bus_override is not None:
             self.bus = self._bus_override
             # An injected bus (tests, custom transports) still gets message auth.
             if hasattr(self.bus, "signer"):
                 self.bus.signer = self.signer
         else:
-            self.bus = build_bus(self.settings, signer=self.signer, insecure_dev_mode=True)
-            log("bus.acl", mode="insecure_dev (no topic ACLs configured)")
+            publish_acl, subscribe_acl = acls_from_specs(self.registry.subsystems)
+            self.bus = build_bus(
+                self.settings,
+                signer=self.signer,
+                publish_acl=publish_acl,
+                subscribe_acl=subscribe_acl,
+            )
+            log("bus.acl", mode="least-privilege", publish=len(publish_acl), subscribe=len(subscribe_acl))
         self.llm = self._llm_override or build_llm(self.settings)
         if self._store_override:
             self.store = self._store_override

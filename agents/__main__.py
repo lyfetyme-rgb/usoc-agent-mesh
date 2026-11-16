@@ -1,8 +1,9 @@
-"""CLI: python -m agents {demo,list,doctor,serve,probe,health,approvals,approve,deny,ingest,demo-fragmentation}
+"""CLI: python -m agents {demo,list,doctor,integrity,serve,probe,health,approvals,approve,deny,ingest,demo-fragmentation}
 
     python -m agents demo "Collect edge telemetry, analyse anomalies, record evidence"
     python -m agents list
     python -m agents doctor
+    python -m agents integrity
     python -m agents serve --host 127.0.0.1 --port 8080
     python -m agents probe --url http://127.0.0.1:8080/ready
     python -m agents health
@@ -23,11 +24,18 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
-from .config import Settings, get_settings
+from .config import Settings, get_settings, subsystems_integrity, verify_subsystems_file
 from .evidence import EvidenceChain
 from .governance import FileApprovalStore
 from .registry import RegistryError, load_registry
-from .security import SecurityError, build_signer, configured_approvers, read_secret, redact_url
+from .security import (
+    SecurityError,
+    build_signer,
+    configured_approvers,
+    read_secret,
+    redact_fields,
+    redact_url,
+)
 from .tools import build_default_tools
 
 DEFAULT_GOAL = (
@@ -63,7 +71,7 @@ def _registry(settings: Settings):
         evidence,
         allow_delete=settings.allow_workspace_delete,
     )
-    return load_registry(settings.subsystems_file, tools)
+    return load_registry(settings.subsystems_file, tools, settings=settings)
 
 
 def _seed_workspace(settings: Settings) -> Path:
@@ -352,6 +360,12 @@ async def _run_serve(args: argparse.Namespace) -> int:
     if getattr(args, "port", None) is not None:
         settings = settings.model_copy(update={"health_port": args.port})
     token = read_secret(settings.health_token, settings.health_token_file)
+    admin_token = read_secret(settings.admin_token, settings.admin_token_file)
+    if token and admin_token and token == admin_token:
+        raise SecurityError(
+            "AGENT_ADMIN_TOKEN must differ from AGENT_HEALTH_TOKEN; "
+            "the probe credential must not open the diagnostics surface"
+        )
 
     mesh = Mesh(settings)
     await mesh.start()
@@ -362,25 +376,33 @@ async def _run_serve(args: argparse.Namespace) -> int:
 
         async def provider(path: str) -> tuple[int, dict]:
             if path == "/health":
-                return 200, {
-                    "status": "ok",
-                    "agents": len(mesh.agents),
-                    "bus": type(mesh.bus).__name__,
-                    "message_auth": mesh.signer is not None,
-                    "fragmentation": mesh.fragmentation is not None,
-                    "fragmentation_error": mesh.fragmentation_error,
+                return 200, await mesh.shell.health(detailed=False)
+            if path == "/ready":
+                ok, info = await mesh.shell.ready(detailed=False)
+                return (200 if ok else 503), info
+            # /diagnostics has already passed admin authentication in HealthServer.
+            return 200, redact_fields(
+                {
+                    "ready": (await mesh.shell.ready(detailed=True))[0],
+                    "health": await mesh.shell.health(detailed=True),
+                    "issues": await mesh.shell.diagnostics(),
+                    "discovery": mesh.shell.discovery(),
                 }
-            ok, info = await mesh.shell.ready()
-            return (200 if ok else 503), info
+            )
 
         server = HealthServer(
-            settings.health_host, settings.health_port, provider, token=token
+            settings.health_host,
+            settings.health_port,
+            provider,
+            token=token,
+            admin_token=admin_token,
         )
         await server.start()
         print(
             f"mesh running: {len(mesh.agents)} agents, bus={type(mesh.bus).__name__}, "
             f"auth={'on' if mesh.signer is not None else 'OFF'}, "
-            f"health=http://{settings.health_host}:{server.port}/health"
+            f"health=http://{settings.health_host}:{server.port}/health, "
+            f"diagnostics={'on' if admin_token else 'disabled'}"
         )
         if settings.bus == "memory":
             print("memory bus is process-local; use AGENT_BUS=redis to accept work from other processes.")
@@ -565,6 +587,22 @@ def cmd_probe(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_integrity(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    if getattr(args, "check", False):
+        digest = verify_subsystems_file(settings.subsystems_file, settings)
+        print(f"ok: {settings.subsystems_file} sha256={digest}")
+        return 0
+    digest, signature = subsystems_integrity(settings.subsystems_file, settings)
+    print(f"file: {settings.subsystems_file}")
+    print(f"AGENT_SUBSYSTEMS_MANIFEST_HASH={digest}")
+    if signature:
+        print(f"AGENT_SUBSYSTEMS_SIGNATURE={signature}")
+    else:
+        print("AGENT_SUBSYSTEMS_SIGNATURE=unavailable (set AGENT_SHARED_SECRET to sign)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agents", description="USOC nine-subsystem agent mesh")
     parser.add_argument("--registry", help="path to subsystems.yaml")
@@ -577,6 +615,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("list", help="print the nine capability cards and their roles")
     sub.add_parser("doctor", help="check config, registry, bus, model and security")
+    integrity = sub.add_parser(
+        "integrity", help="print or verify the capability-card manifest hash/signature"
+    )
+    integrity.add_argument("--check", action="store_true", help="verify pinned values instead of printing")
     serve = sub.add_parser("serve", help="start the mesh, health endpoint and recovery loop")
     serve.add_argument("--host", help="health bind address (default AGENT_HEALTH_HOST)")
     serve.add_argument("--port", type=int, help="health port (default AGENT_HEALTH_PORT)")
@@ -620,6 +662,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list(args)
     if args.command == "doctor":
         return cmd_doctor(args)
+    if args.command == "integrity":
+        return cmd_integrity(args)
     if args.command == "approvals":
         return cmd_approvals(args)
     if args.command == "probe":
