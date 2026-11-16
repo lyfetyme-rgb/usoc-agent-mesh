@@ -73,6 +73,23 @@ class Settings(BaseSettings):
     kms_sign_token_file: Path | None = None
     kms_sign_timeout_s: float = 5.0
 
+    # Atlassian publishing bridge: opt-in and approval-gated. A decided HITL
+    # approval can publish a signed ADR/evidence bundle and a JSM request.
+    # Credentials come from env or a mounted file, never from this config.
+    atlassian_bridge_enabled: bool = False
+    atlassian_base_url: str | None = None
+    atlassian_auth_mode: Literal["bearer", "basic"] = "bearer"
+    atlassian_api_key: str | None = Field(default=None, repr=False)
+    atlassian_api_key_file: Path | None = None
+    atlassian_email: str | None = None
+    atlassian_confluence_space_key: str | None = None
+    atlassian_jira_project_key: str | None = None
+    atlassian_jsm_enabled: bool = False
+    atlassian_jsm_service_desk_id: str | None = None
+    atlassian_jsm_request_type_id: str | None = None
+    atlassian_publish_state_file: Path | None = None
+    atlassian_timeout_s: float = 10.0
+
     # service: container health/readiness endpoint
     health_host: str = "127.0.0.1"
     health_port: int = 8080

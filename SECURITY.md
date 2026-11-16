@@ -149,6 +149,43 @@ and carries a keyed MAC over its content. Editing a record, deleting one, or
 recomputing the hash without the cluster secret all fail `evidence.verify()`.
 BENGAL independently verifies the chain.
 
+### Atlassian publishing bridge (opt-in)
+
+`agents/atlassian_bridge.py` is the only outward publishing path for governed
+decisions. It is **disabled by default** (`AGENT_ATLASSIAN_BRIDGE=false`). When
+enabled, `agents approve` / `agents deny` publish *after* the decision is
+persisted and appended to evidence:
+
+* A Confluence page holds a signed publication envelope covering the exact
+  approval record, evidence chain head and rendered ADR text. The signature
+  uses the mesh signer under the `atlassian-publication` scope, so a reader can
+  prove the ADR is the one the mesh decided. Taint/provenance disclosure is
+  included for tainted chains.
+* Optionally, a JSM request records the same decision and links back to the ADR.
+* Publications are idempotent: the signature digest is recorded in
+  `AGENT_ATLASSIAN_PUBLISH_STATE_FILE`, so a retry never creates a duplicate
+  page or ticket. Use `python -m agents publish-decision <id>` to retry after a
+  network failure; the mesh decision itself is unaffected by a publish error.
+
+Configuration (a Bearer service-account key is recommended over a personal
+token; the value always comes from env or a mounted file, never from config):
+
+```bash
+AGENT_ATLASSIAN_BRIDGE=true
+AGENT_ATLASSIAN_BASE_URL=https://testing-bay.atlassian.net
+AGENT_ATLASSIAN_API_KEY_FILE=/run/secrets/atlassian_api_key
+AGENT_ATLASSIAN_CONFLUENCE_SPACE_KEY=SD
+AGENT_ATLASSIAN_JSM_ENABLED=true          # requires a JSM project on the site
+AGENT_ATLASSIAN_JSM_SERVICE_DESK_ID=...
+AGENT_ATLASSIAN_JSM_REQUEST_TYPE_ID=...
+```
+
+Fail-closed rules: an incomplete config, a missing signer, a pending approval,
+a corrupt state file or a non-2xx Atlassian response all raise `SecurityError`.
+No AI recommendation can publish — publication requires an already-decided
+approval with an approver identity and timestamp. The publishing tests use an
+injected HTTP transport, so no live Atlassian writes occur in CI.
+
 ### Secrets
 
 * Prefer `AGENT_SHARED_SECRET_FILE` and `AGENT_HEALTH_TOKEN_FILE` over inline

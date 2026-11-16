@@ -1,4 +1,4 @@
-"""CLI: python -m agents {demo,list,doctor,integrity,keygen,sign-config,serve,probe,health,approvals,approve,deny,ingest,demo-fragmentation}
+"""CLI: python -m agents {demo,list,doctor,integrity,keygen,sign-config,serve,probe,health,approvals,approve,deny,publish-decision,ingest,demo-fragmentation}
 
     python -m agents demo "Collect edge telemetry, analyse anomalies, record evidence"
     python -m agents list
@@ -11,6 +11,7 @@
     python -m agents health
     python -m agents approvals
     python -m agents approve apr-1234 --by alice
+    python -m agents publish-decision apr-1234
     python -m agents ingest --fixtures fixtures/fragmentation
     python -m agents demo-fragmentation --fixtures fixtures/fragmentation
 """
@@ -165,10 +166,27 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
                 "tainted": req.tainted,
             },
         )
-        return req
+        publication = None
+        if settings.atlassian_bridge_enabled:
+            from .atlassian_bridge import build_bridge
+
+            bridge = build_bridge(settings, signer)
+            seq, digest = chain.head
+            try:
+                publication = bridge.publish_decision(
+                    req, {"seq": seq, "hash": digest}
+                )
+            except SecurityError as exc:
+                # The decision is already persisted and signed. Publication is
+                # idempotent, so an operator can retry with `publish-decision`.
+                print(
+                    f"[warn] decision recorded but Atlassian publication failed: {exc}",
+                    file=sys.stderr,
+                )
+        return req, publication
 
     try:
-        req = asyncio.run(run())
+        req, publication = asyncio.run(run())
     except KeyError as exc:
         print(str(exc))
         if store.rejected:
@@ -182,6 +200,45 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
         print(str(exc))
         return 1
     print(f"{req.id} is now {req.status.value} ({req.target}); decided by {req.decided_by}")
+    if publication is not None:
+        print(
+            f"published ADR: {publication.page_url} "
+            f"(jsm={publication.jsm_key or 'disabled'}, idempotent={publication.idempotent})"
+        )
+    return 0
+
+
+def cmd_publish_decision(args: argparse.Namespace) -> int:
+    """Retry or re-verify publication of an already-decided approval."""
+    from .atlassian_bridge import build_bridge
+    from .governance import ApprovalStatus
+
+    settings = _settings(args)
+    signer = _signer(settings)
+    store = _approval_store(settings, signer)
+
+    async def run():
+        req = await store.get(args.approval_id)
+        if req is None:
+            raise KeyError(f"no such approval: {args.approval_id}")
+        if req.status not in (ApprovalStatus.APPROVED, ApprovalStatus.DENIED):
+            raise ValueError("only decided approvals may be published")
+        chain = EvidenceChain(
+            settings.workspace / "evidence" / "chain.jsonl", signer=signer
+        )
+        seq, digest = chain.head
+        bridge = build_bridge(settings, signer)
+        return bridge.publish_decision(req, {"seq": seq, "hash": digest})
+
+    try:
+        result = asyncio.run(run())
+    except (KeyError, ValueError, SecurityError) as exc:
+        print(str(exc))
+        return 1
+    print(
+        f"published {args.approval_id}: page={result.page_id} "
+        f"jsm={result.jsm_key or 'disabled'} idempotent={result.idempotent}"
+    )
     return 0
 
 
@@ -717,6 +774,11 @@ def build_parser() -> argparse.ArgumentParser:
     deny.add_argument("--by", default="operator")
     deny.add_argument("--note")
 
+    publish = sub.add_parser(
+        "publish-decision", help="publish/retry a decided approval to Atlassian"
+    )
+    publish.add_argument("approval_id")
+
     ingest = sub.add_parser("ingest", help="poll read-only connectors and print normalized signals")
     ingest.add_argument("--fixtures", help="directory of <source_type>.jsonl fixtures")
     ingest.add_argument("--connectors", help="path to connectors.yaml")
@@ -755,6 +817,8 @@ def main(argv: list[str] | None = None) -> int:
         return _decide(args, True)
     if args.command == "deny":
         return _decide(args, False)
+    if args.command == "publish-decision":
+        return cmd_publish_decision(args)
     try:
         if args.command == "demo":
             return asyncio.run(_run_demo(args))

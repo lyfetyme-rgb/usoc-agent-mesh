@@ -1,5 +1,6 @@
 """USOC: nine governed subsystem agents on a typed message bus."""
 
+from .atlassian_bridge import AtlassianBridge, PublicationEnvelope, build_bridge
 from .asymmetric import (
     Ed25519KMSSigner,
     Ed25519Signer,
@@ -80,6 +81,8 @@ __all__ = [
     "ApprovalRequest",
     "ApprovalStatus",
     "ApprovalStore",
+    "AtlassianBridge",
+    "PublicationEnvelope",
     "Artifact",
     "BaseAgent",
     "BengalAgent",
