@@ -84,7 +84,8 @@ configuration or chat. See
 rotation procedure and verified SSRF/XSS properties.
 
 The build-to-demo order, the non-negotiable rules, and what "done" means are
-pinned in [PLAYBOOK.md](PLAYBOOK.md).
+pinned in [toolbox/PLAYBOOK.md](toolbox/PLAYBOOK.md). The delivery
+constitution and reusable scripts/templates live in [toolbox/](toolbox/README.md).
 
 ## The nine subsystems
 
@@ -504,6 +505,7 @@ subsystems.yaml
 Dockerfile
 docker-compose.yml
 SECURITY.md
+toolbox/           PLAYBOOK, CONSTITUTION (SpecKit-style SDLC), templates, scripts, docs index
 tests/
 ```
 
