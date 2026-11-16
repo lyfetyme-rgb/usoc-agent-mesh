@@ -269,6 +269,10 @@ class InMemoryBus:
             if timeout <= 0:
                 return None
 
+    async def backlog(self) -> dict[str, int]:
+        """Number of queued-but-undelivered messages per agent."""
+        return {agent: queue.qsize() for agent, queue in self._queues.items()}
+
     async def ack(self, agent: str, msg: Message) -> None:
         self.stats["acked"] += 1
 
@@ -452,6 +456,27 @@ class RedisBus:
             self._inflight[msg.id] = raw_id
             self.stats["delivered"] += 1
             return msg
+
+    async def backlog(self) -> dict[str, int]:
+        """Pending messages per subscribed agent (per its consumer group).
+
+        Demand signal for scaling: pending entries that no replica has
+        acknowledged yet, summed across the streams this bus tracks.
+        """
+        out: dict[str, int] = {}
+        for agent, streams in self._streams.items():
+            total = 0
+            for stream in streams:
+                try:
+                    info = await self._redis.xinfo_groups(stream)
+                except Exception:
+                    info = []
+                for g in info:
+                    if isinstance(g, dict) and g.get("name") == f"{self._group}:{agent}":
+                        total += int(g.get("pending", 0) or 0)
+                        break
+            out[agent] = total
+        return out
 
     async def ack(self, agent: str, msg: Message) -> None:
         stream_id = self._inflight.pop(msg.id, None)

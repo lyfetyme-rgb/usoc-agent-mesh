@@ -38,7 +38,7 @@ python -m agents demo            # one governed goal end to end
 python -m agents health          # SHELL health + diagnostics
 python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
-python -m pytest -q              # 181 tests, no network
+python -m pytest -q              # 186 tests, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
@@ -62,7 +62,7 @@ the bridge is opt-in and its tests use an injected HTTP transport.
 
 | Time | Show | Point |
 |---|---|---|
-| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Three commits: offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge. Clean remote, 181 tests passing. |
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Three commits: offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge. Clean remote, 186 tests passing. |
 | 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
 | 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
 | 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |
@@ -512,9 +512,31 @@ peers, write evidence, and get out.
   dead worker's pending messages, handle SIGINT/SIGTERM, and expose `/health`
   and `/ready` on their own port.
 
+### Scaling on demand
+
+`scale-advice` reads the live Redis backlog per agent (pending entries per
+consumer group) and prints the desired replica count — clamped between
+`AGENT_SCALE_MIN_REPLICAS` (default 1) and `AGENT_SCALE_MAX_REPLICAS`
+(default 4), one replica per `AGENT_SCALE_MESSAGES_PER_REPLICA` pending
+messages:
+
+```powershell
+python -m agents scale-advice             # human readable
+python -m agents scale-advice --json --agents oekp,bengal
+```
+
+```text
+oekp        pending=17   desired=3  (backlog 17 >= 8 per replica)
+bengal      pending=0    desired=1  (steady state)
+```
+
+Workers publish no host ports; scaling them is `docker compose ... up -d
+--scale oekp-worker=3` (or wire `scale-advice --json` into an HPA custom
+metric). The loop reads real backlog, not a guess.
+
 `docker-compose.workers.example.yml` shows the shape with a control plane and
-three workers. Shared state lives on the `mesh-data` volume; Redis streams
-split the load; unknown subsystem ids fail closed in `worker`.
+scale-on-demand workers. Shared state lives on the `mesh-data` volume; Redis
+streams split the load; unknown subsystem ids fail closed in `worker`.
 
 Still single-host by design: approvals are a locked JSON file and evidence is
 a JSONL chain on one volume. Moving to multiple machines means a transactional

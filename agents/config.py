@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     atlassian_publish_state_file: Path | None = None
     atlassian_timeout_s: float = 10.0
 
+    # worker autoscaling advice (reads Redis backlog; see `agents scale-advice`)
+    scale_min_replicas: int = 1
+    scale_max_replicas: int = 4
+    scale_messages_per_replica: int = 8
+
     # service: container health/readiness endpoint
     health_host: str = "127.0.0.1"
     health_port: int = 8080

@@ -1,4 +1,4 @@
-"""CLI: python -m agents {demo,list,doctor,integrity,keygen,sign-config,serve,worker,probe,health,approvals,approve,deny,publish-decision,ingest,demo-fragmentation}
+"""CLI: python -m agents {demo,list,doctor,integrity,keygen,sign-config,serve,worker,scale-advice,probe,health,approvals,approve,deny,publish-decision,ingest,demo-fragmentation}
 
     python -m agents demo "Collect edge telemetry, analyse anomalies, record evidence"
     python -m agents list
@@ -204,6 +204,49 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
         print(
             f"published ADR: {publication.page_url} "
             f"(jsm={publication.jsm_key or 'disabled'}, idempotent={publication.idempotent})"
+        )
+    return 0
+
+
+def cmd_scale_advice(args: argparse.Namespace) -> int:
+    """Report desired worker replicas per agent from live Redis backlog."""
+    from .autoscale import ScalePolicy
+    from .mesh import Mesh
+
+    settings = _settings(args)
+    if settings.bus != "redis":
+        print("scale-advice requires AGENT_BUS=redis (the backlog lives in Redis streams)")
+        return 1
+    raw = getattr(args, "agents", None)
+    agent_ids = [item.strip() for item in raw.split(",") if item.strip()] if raw else None
+
+    async def run():
+        mesh = Mesh(settings, agents=agent_ids, run_orchestrator=False)
+        await mesh.start()
+        try:
+            bus = mesh.bus
+            return await bus.backlog()
+        finally:
+            await mesh.stop()
+
+    try:
+        backlog = asyncio.run(run())
+    except Exception as exc:
+        print(f"cannot read backlog: {exc}")
+        return 1
+    policy = ScalePolicy(
+        settings.scale_min_replicas,
+        settings.scale_max_replicas,
+        settings.scale_messages_per_replica,
+    )
+    targets = policy.targets(backlog, {agent: 1 for agent in backlog})
+    if getattr(args, "json", False):
+        print(policy.as_json(targets))
+        return 0
+    for target in targets:
+        print(
+            f"{target.agent:<10} pending={target.pending:<4} "
+            f"desired={target.desired}  ({target.reason})"
         )
     return 0
 
@@ -784,6 +827,11 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--with-orchestrator", action="store_true", help="also run the orchestrator (not recommended on workers)")
     worker.add_argument("--host", help="health bind address (default AGENT_HEALTH_HOST)")
     worker.add_argument("--port", type=int, help="health port (default AGENT_HEALTH_PORT)")
+    scale = sub.add_parser(
+        "scale-advice", help="read live Redis backlog and print desired worker replicas per agent"
+    )
+    scale.add_argument("--agents", help="comma-separated subsystem ids (default: all nine)")
+    scale.add_argument("--json", action="store_true", help="emit the recommendation as JSON")
     probe = sub.add_parser("probe", help="check a running mesh health endpoint")
     probe.add_argument("--url", help="health URL (default from settings)")
     probe.add_argument("--token", help="bearer token (default AGENT_HEALTH_TOKEN)")
@@ -845,6 +893,8 @@ def main(argv: list[str] | None = None) -> int:
         return _decide(args, False)
     if args.command == "publish-decision":
         return cmd_publish_decision(args)
+    if args.command == "scale-advice":
+        return cmd_scale_advice(args)
     try:
         if args.command == "demo":
             return asyncio.run(_run_demo(args))
