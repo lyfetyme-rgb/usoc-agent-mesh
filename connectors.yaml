@@ -1,0 +1,22 @@
+connectors:
+  - name: jira_cloud
+    type: http_json
+    source_type: workflow_ticketing
+    url: "https://lyfe3493.atlassian.net/rest/api/3/search/jql?jql=updated%20%3E%3D%20-30d%20ORDER%20BY%20updated%20DESC&maxResults=100&fields=summary,updated,priority,issuetype"
+    allowed_hosts:
+      - lyfe3493.atlassian.net
+    records_path: issues
+    basic_user_env: JIRA_EMAIL
+    token_env: JIRA_API_TOKEN
+    max_records: 100
+    field_map:
+      external_id: [key]
+      entity: [key]
+      timestamp: [fields.updated]
+      title: [fields.summary]
+      severity: [fields.priority.name]
+      category: [fields.issuetype.name]
+      detail: []
+      aliases: []
+      tags: []
+      attributes: [key]

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>USOC | Operations Center</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="brand"><div class="mark">U</div><div><strong>USOC <span>/</span> COMMAND</strong><small>UNIFIED SYSTEM OPERATIONS CENTER</small></div></div>
+    <div class="header-right"><div class="clock"><strong id="clock">--:--:--</strong><small id="date">--</small></div><button id="theme" type="button" aria-label="Toggle color theme">◐ LIGHT</button></div>
+  </header>
+  <main>
+    <div class="page-heading"><div><p class="eyebrow">OPERATIONS OVERVIEW <span> / </span> LIVE STATUS</p><h1>Mission control<span>.</span></h1><p class="subtitle">A unified view of your systems, signals, and governance.</p></div><div class="sync"><span class="dot" id="sync-dot"></span><span id="sync">CONNECTING</span><small id="updated">Awaiting first update</small></div></div>
+    <section class="statusbar" aria-label="Platform status">
+      <div><span>PLATFORM</span><strong id="platform">CHECKING</strong></div>
+      <div><span>MESSAGE BUS</span><strong id="bus">—</strong></div>
+      <div><span>MESSAGE AUTH</span><strong id="auth">—</strong></div>
+      <div><span>CONNECTORS</span><strong id="connector-status">—</strong></div>
+    </section>
+    <div class="grid">
+      <section class="panel wide"><div class="panel-heading"><div><p class="eyebrow">01 / OPERATIONS</p><h2>Signal & incident feed</h2></div><span class="tag muted">NOT CONNECTED</span></div><div class="empty"><div class="empty-icon">⌁</div><strong>No live incident feed yet</strong><p>Correlated incidents are available through the CLI. A dashboard feed has not been connected.</p></div><div class="panel-foot"><span>LIVE INCIDENTS</span><span>—</span></div></section>
+      <section class="panel"><div class="panel-heading"><div><p class="eyebrow">02 / PLATFORM</p><h2>Mesh health</h2></div><span class="tag" id="ready-tag">CHECKING</span></div><div class="metrics"><div><strong id="agents">—</strong><small>COORDINATORS</small></div><div><strong id="roles">—</strong><small>DECLARED ROLES</small></div><div><strong id="pending">—</strong><small>PENDING APPROVALS</small></div></div><div class="rule"></div><div class="row"><span>Runtime status</span><strong id="runtime">—</strong></div><div class="row"><span>Transport</span><strong id="transport">—</strong></div><div class="row"><span>Missing agents</span><strong id="missing">—</strong></div></section>
+      <section class="panel"><div class="panel-heading"><div><p class="eyebrow">03 / OVERSIGHT</p><h2>Human governance</h2></div><span class="tag muted">READ ONLY</span></div><div class="governance"><span class="shield">◇</span><div><strong>Human-in-the-loop</strong><p>Governed actions require policy evaluation and approval. No decisions can be made from this dashboard.</p></div></div><div class="flow"><span>PROPOSE</span><b>→</b><span>POLICY</span><b>→</b><span>HUMAN</span><b>→</b><span>EVIDENCE</span></div></section>
+      <section class="panel"><div class="panel-heading"><div><p class="eyebrow">04 / INTEGRATIONS</p><h2>Connector layer</h2></div><span class="tag" id="configured">—</span></div><div class="connector"><div class="connector-icon">↗</div><div><strong>Configured connectors</strong><small>Configuration status only · not a connectivity check</small></div><strong id="connectors">—</strong></div><p class="note" id="connector-note">Awaiting status from mesh.</p></section>
+      <section class="panel"><div class="panel-heading"><div><p class="eyebrow">05 / OBSERVABILITY</p><h2>Metrics & trends</h2></div><span class="tag muted">PLANNED</span></div><div class="empty compact"><div class="empty-icon">⌁</div><strong>No metrics source connected</strong><p>Prometheus is the selected next integration. No synthetic data is displayed.</p></div></section>
+      <section class="panel wide"><div class="panel-heading"><div><p class="eyebrow">06 / PUBLIC RESEARCH</p><h2>Historical breach notifications</h2></div><span class="tag muted">HISTORICAL · READ ONLY</span></div><p class="note">Washington State public data · latest 100 notifications · two related tables joined by notification ID. Not live alerts or independent sources.</p><div class="metrics"><div><strong id="public-count">—</strong><small>NOTIFICATIONS</small></div><div><strong id="public-matched">—</strong><small>WITH DETAILS</small></div><div><strong id="public-detail">—</strong><small>DETAIL ROWS</small></div></div><div class="rule"></div><div class="row"><span>Reported causes in sample</span><strong id="public-causes">—</strong></div><p class="note" id="public-message" role="status">Load the public dataset to view its current sample.</p><button id="public-load" type="button">LOAD PUBLIC DATA ↗</button></section>
+      <section class="panel"><div class="panel-heading"><div><p class="eyebrow">07 / RESPONSE</p><h2>Activity & evidence</h2></div><span class="tag muted">NOT CONNECTED</span></div><div class="empty compact"><strong>Evidence view not connected</strong><p>Evidence is recorded by the mesh; an authenticated dashboard view is still to be built.</p></div></section>
+    </div>
+    <footer><span>USOC <b> / </b> OPERATIONS CENTER</span><span>LOCAL READ-ONLY VIEW · NO SIMULATED LIVE DATA</span></footer>
+  </main>
+</body>
+</html>

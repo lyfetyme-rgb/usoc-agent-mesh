@@ -1,0 +1,103 @@
+name: usoc-mesh
+
+# Run with:
+#   docker compose --env-file .env.docker up -d --build
+# Secrets are files, not environment variables:
+#   ./secrets/agent_shared_secret.txt
+#   ./secrets/health_token.txt
+# See SECURITY.md for generation commands and the deployment checklist.
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.docker}
+      - --appendonly
+      - "yes"
+      - --save
+      - ""
+    environment:
+      # Keeps the password off the redis-cli command line.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    networks:
+      - internal
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  mesh:
+    build: .
+    image: usoc-mesh:local
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      AGENT_BUS: redis
+      AGENT_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.docker}@redis:6379/0
+      AGENT_SHARED_SECRET_FILE: /run/secrets/agent_shared_secret
+      AGENT_HEALTH_TOKEN_FILE: /run/secrets/health_token
+      AGENT_HEALTH_HOST: 0.0.0.0
+      AGENT_HEALTH_PORT: "8080"
+      # Fail closed if the deployment forgets to name its approvers.
+      AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
+      AGENT_APPROVERS: ${AGENT_APPROVERS:?set AGENT_APPROVERS in .env.docker}
+      AGENT_ALLOWED_TARGETS: "${AGENT_ALLOWED_TARGETS:-sandbox/*,staging/*}"
+      AGENT_APPROVAL_TTL_S: "${AGENT_APPROVAL_TTL_S:-86400}"
+      AGENT_LOG_JSON: "true"
+      # Optional: point at a reviewed read-only connectors file mounted below.
+      # AGENT_CONNECTORS_FILE: /app/connectors.yaml
+    secrets:
+      - agent_shared_secret
+      - health_token
+    volumes:
+      - mesh-data:/data
+      # Optional fragmentation inputs. Copy connectors.example.yaml to
+      # connectors.yaml, review it, then uncomment both mounts:
+      # - ./connectors.yaml:/app/connectors.yaml:ro
+      # - ./fixtures:/app/fixtures:ro
+    # Keep the read-only health endpoint off every interface by default.
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - internal
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-m", "agents", "probe", "--url", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+networks:
+  # Redis is not reachable from outside this network.
+  internal:
+    internal: true
+  # The mesh needs egress only if you point it at a remote model endpoint.
+  egress:
+
+volumes:
+  redis-data:
+  mesh-data:
+
+secrets:
+  agent_shared_secret:
+    file: ./secrets/agent_shared_secret.txt
+  health_token:
+    file: ./secrets/health_token.txt

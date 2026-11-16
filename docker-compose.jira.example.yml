@@ -1,0 +1,9 @@
+# Optional override. Set JIRA_EMAIL and JIRA_API_TOKEN in your shell first.
+services:
+  mesh:
+    environment:
+      AGENT_CONNECTORS_FILE: /app/connectors.yaml
+      JIRA_EMAIL: ${JIRA_EMAIL:?set JIRA_EMAIL in your shell}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN:?set JIRA_API_TOKEN in your shell}
+    volumes:
+      - ./connectors.yaml:/app/connectors.yaml:ro

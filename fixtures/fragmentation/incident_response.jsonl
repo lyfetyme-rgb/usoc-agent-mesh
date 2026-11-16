@@ -1,0 +1,1 @@
+{"id":"ir-2201","timestamp":"2026-11-14T11:09:00Z","entity":"edge-02","entity_type":"host","severity":"high","category":"containment_candidate","title":"IR playbook flagged edge-02 for isolation","playbook":"PB-ISOLATE"}

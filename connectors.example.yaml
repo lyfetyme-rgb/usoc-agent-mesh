@@ -1,0 +1,94 @@
+# USOC read-only connectors.
+#
+# Copy to connectors.yaml (or point AGENT_CONNECTORS_FILE at this file) to have
+# the mesh ingest incumbent tools. Connectors are GET/file-read only. They never
+# execute a change; any containment still goes through policy, human approval and
+# the evidence chain.
+#
+# JSONL paths are resolved relative to this file and may not escape its
+# directory. For http_json, the host must be allowlisted here or in
+# AGENT_CONNECTOR_ALLOWED_HOSTS, HTTPS is required except for loopback, and the
+# token is read from the environment variable named by token_env.
+#
+# The fixtures below make the whole scenario runnable offline:
+#   python -m agents ingest --fixtures fixtures/fragmentation
+#   python -m agents demo-fragmentation --fixtures fixtures/fragmentation
+
+connectors:
+  - name: observability
+    type: jsonl
+    source_type: observability
+    path: fixtures/fragmentation/observability.jsonl
+    entity_type: host
+
+  - name: vulnerability
+    type: jsonl
+    source_type: vulnerability
+    path: fixtures/fragmentation/vulnerability.jsonl
+
+  - name: cloud_cost
+    type: jsonl
+    source_type: cloud_cost
+    path: fixtures/fragmentation/cloud_cost.jsonl
+
+  - name: soc
+    type: jsonl
+    source_type: soc
+    path: fixtures/fragmentation/soc.jsonl
+    entity_type: host
+
+  - name: identity
+    type: jsonl
+    source_type: identity
+    path: fixtures/fragmentation/identity.jsonl
+
+  - name: network
+    type: jsonl
+    source_type: network
+    path: fixtures/fragmentation/network.jsonl
+    entity_type: host
+
+  - name: infrastructure
+    type: jsonl
+    source_type: infrastructure
+    path: fixtures/fragmentation/infrastructure.jsonl
+
+  - name: ticketing
+    type: jsonl
+    source_type: workflow_ticketing
+    path: fixtures/fragmentation/ticketing.jsonl
+
+  - name: backup
+    type: jsonl
+    source_type: backup_recovery
+    path: fixtures/fragmentation/backup.jsonl
+
+  - name: incident_response
+    type: jsonl
+    source_type: incident_response
+    path: fixtures/fragmentation/incident_response.jsonl
+
+  - name: cyber_training
+    type: jsonl
+    source_type: cyber_training
+    path: fixtures/fragmentation/cyber_training.jsonl
+
+  # Example of a real incumbent API. Disable it until the host is allowlisted.
+  - name: vuln_manager_api
+    type: http_json
+    source_type: vulnerability
+    enabled: false
+    url: https://vulnerability.example.gov/api/v1/findings
+    records_path: findings
+    token_env: VULN_MANAGER_TOKEN
+    allowed_hosts:
+      - vulnerability.example.gov
+    max_records: 500
+    field_map:
+      external_id: [finding_id, id]
+      timestamp: [first_found, last_seen]
+      entity: [asset.hostname, hostname, resource_id]
+      severity: [severity, cvss_score]
+      title: [title, name]
+      category: [category, finding_type]
+      aliases: [asset.instance_id, instance_id]

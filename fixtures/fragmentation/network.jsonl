@@ -1,0 +1,1 @@
+{"id":"net-5510","timestamp":"2026-11-14T11:05:00Z","entity":"edge-02","entity_type":"host","severity":"high","category":"egress_anomaly","title":"Unexpected egress and packet loss on edge-02","egress_mb":8700}

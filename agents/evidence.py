@@ -1,0 +1,159 @@
+"""OEKP: append-only, hash-chained evidence.
+
+Every governed decision, approval, execution and validation result can be
+appended here. Each record hashes the previous record, so tampering with or
+removing an entry breaks verification - which is exactly what BENGAL checks.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from .security import Signer, secure_dir, secure_file
+
+
+class EvidenceRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    seq: int
+    id: str
+    kind: str
+    actor: str
+    subsystem: str | None = None
+    correlation_id: str = ""
+    mission_id: str | None = None
+    classification: str = "internal"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    data: dict[str, Any] = Field(default_factory=dict)
+    prev_hash: str = "genesis"
+    hash: str = ""
+    # Keyed MAC over the record. Hash chains detect edits; the MAC makes them
+    # impossible to recompute without the cluster secret.
+    mac: str = ""
+
+    def compute_hash(self) -> str:
+        # The hash covers the record content; the MAC is a separate envelope
+        # field, so neither the hash nor the MAC can be part of the hash input.
+        body = self.model_dump(mode="json", exclude={"hash", "mac"})
+        blob = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+
+
+class EvidenceChain:
+    def __init__(self, path: str | Path, *, signer: Signer | None = None) -> None:
+        self.path = Path(path)
+        secure_dir(self.path.parent)
+        self.signer = signer
+        self._lock = asyncio.Lock()
+        self._seq = 0
+        self._last_hash = "genesis"
+        self._loaded = False
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        if not self.path.is_file():
+            return
+        last: EvidenceRecord | None = None
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last = EvidenceRecord.model_validate_json(line)
+                except ValueError:
+                    continue
+        if last:
+            self._seq = last.seq
+            self._last_hash = last.hash
+
+    async def append(
+        self,
+        *,
+        kind: str,
+        actor: str,
+        correlation_id: str = "",
+        data: dict[str, Any] | None = None,
+        subsystem: str | None = None,
+        mission_id: str | None = None,
+        classification: str = "internal",
+    ) -> EvidenceRecord:
+        async with self._lock:
+            self._load()
+            record = EvidenceRecord(
+                seq=self._seq + 1,
+                id=f"ev-{uuid.uuid4().hex[:12]}",
+                kind=kind,
+                actor=actor,
+                subsystem=subsystem,
+                correlation_id=correlation_id,
+                mission_id=mission_id,
+                classification=classification,
+                data=data or {},
+                prev_hash=self._last_hash,
+            )
+            record.hash = record.compute_hash()
+            if self.signer is not None:
+                record.mac = self.signer.sign_record(
+                    "evidence", record.model_dump(mode="json", exclude={"mac"})
+                )
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(record.model_dump_json() + "\n")
+                fh.flush()
+            secure_file(self.path)
+            self._seq = record.seq
+            self._last_hash = record.hash
+            return record
+
+    def records(self, limit: int | None = None) -> list[EvidenceRecord]:
+        if not self.path.is_file():
+            return []
+        out: list[EvidenceRecord] = []
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(EvidenceRecord.model_validate_json(line))
+                except ValueError:
+                    out.append(
+                        EvidenceRecord(seq=-1, id="corrupt", kind="corrupt", actor="unknown", hash="corrupt")
+                    )
+        return out[-limit:] if limit else out
+
+    def verify(self) -> tuple[bool, str]:
+        expected_prev = "genesis"
+        expected_seq = 1
+        records = self.records()
+        for record in records:
+            if record.seq != expected_seq:
+                return False, f"sequence gap at record {record.id} (expected {expected_seq}, got {record.seq})"
+            if record.prev_hash != expected_prev:
+                return False, f"broken chain at record {record.id}"
+            if record.compute_hash() != record.hash:
+                return False, f"record {record.id} was modified"
+            if self.signer is not None:
+                ok, _ = self.signer.verify_record(
+                    "evidence", record.model_dump(mode="json", exclude={"mac"}), record.mac
+                )
+                if not ok:
+                    return False, f"record {record.id} has an invalid MAC"
+            expected_prev = record.hash
+            expected_seq += 1
+        return True, f"{len(records)} records verified"
+
+    @property
+    def head(self) -> tuple[int, str]:
+        self._load()
+        return self._seq, self._last_hash

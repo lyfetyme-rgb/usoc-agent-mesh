@@ -1,0 +1,19 @@
+# Historical public breach notifications, not live threats or managed assets.
+# Run only in an isolated testing workspace; never propose real containment.
+connectors:
+  - name: wa_breach_history
+    type: http_json
+    source_type: incident_response
+    url: "https://data.wa.gov/resource/sb4j-ca4h.json?%24limit=100"
+    allowed_hosts: [data.wa.gov]
+    max_records: 100
+    field_map:
+      external_id: [id]
+      entity: [name]
+      timestamp: [datesubmitted]
+      title: [databreachcause]
+      category: [cyberattacktype, databreachcause]
+      detail: []
+      aliases: []
+      tags: []
+      attributes: [industrytype, year, washingtoniansaffectedrange]

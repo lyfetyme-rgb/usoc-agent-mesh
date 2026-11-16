@@ -1,0 +1,611 @@
+"""Agent runtime.
+
+One ``BaseAgent`` per subsystem. The runtime owns everything that is the same
+for all nine, so a subsystem author only writes domain logic:
+
+    mailbox loop -> validate -> enforce deadline/hop/budget -> handle -> reply
+    retries with backoff, dead lettering, idempotency, concurrency limits
+
+Agents collaborate through two primitives that keep the topology flat:
+
+``delegate(recipient, ...)``  send a TaskSpec and await its TaskResult
+``ask(recipient, ...)``       send a Query and await its QueryReply
+
+Both are request/response over the bus, keyed by correlation id. No agent ever
+holds a reference to another agent, so any of the nine can be restarted,
+scaled or replaced without touching the others.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from .bus import Bus
+from .config import Settings
+from .contracts import (
+    GOVERNED_ACTIONS,
+    ActionClass,
+    Artifact,
+    Classification,
+    ErrorCode,
+    Failure,
+    Handoff,
+    Message,
+    Query,
+    QueryReply,
+    RiskLevel,
+    TaskResult,
+    TaskSpec,
+)
+from .evidence import EvidenceChain
+from .governance import DecisionType, GovernanceDecision, PolicyEngine
+from .llm import LLM
+from .observability import Metrics, bound, log
+from .registry import SubsystemSpec
+from .store import StateStore
+from .tools import ToolRegistry, ToolError
+
+
+class AgentError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class RetryableError(RuntimeError):
+    """Raised when the work may succeed on a later attempt."""
+
+
+class Outcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str
+    data: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    artifacts: list[Artifact] = Field(default_factory=list)
+    needs: list[str] = Field(default_factory=list, description="other subsystem ids needed to finish")
+
+
+TASK_SYSTEM = """You are the {name} subsystem, one agent in a mesh of {count} cooperating agents.
+Your job: {description}
+Your capabilities: {capabilities}
+Tools you may call: {tools}
+
+Rules:
+1. Do only your subsystem's job, at the depth the objective requires.
+2. Use supplied inputs and tool results. Never invent facts, files or numbers.
+3. If finishing requires another subsystem, list its id in "needs".
+4. Be concise. The requester sees your summary, not your reasoning.
+5. Reply with one JSON object:
+   {{"summary": "...", "data": {{}}, "confidence": 0.0-1.0,
+     "artifacts": [{{"name": "...", "kind": "text|json|file|url", "value": "..."}}],
+     "needs": []}}
+"""
+
+QUERY_SYSTEM = """You are the {name} subsystem. Answer the question from the supplied context only.
+If the context is insufficient, say what is missing. Two or three sentences.
+"""
+
+
+@dataclass
+class Pending:
+    """Correlation id -> future, for request/response over a fire-and-forget bus."""
+
+    futures: dict[str, asyncio.Future] = field(default_factory=dict)
+
+    def expect(self, correlation_id: str) -> asyncio.Future:
+        if correlation_id in self.futures:
+            raise AgentError(ErrorCode.BAD_PLAN.value, f"duplicate correlation {correlation_id}")
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.futures[correlation_id] = future
+        return future
+
+    def resolve(self, correlation_id: str, payload: Any) -> None:
+        future = self.futures.pop(correlation_id, None)
+        if future is not None and not future.done():
+            future.set_result(payload)
+        elif future is None:
+            log("agent.orphan_reply", correlation=correlation_id)
+
+    def discard(self, correlation_id: str) -> None:
+        self.futures.pop(correlation_id, None)
+
+    def fail_all(self, exc: BaseException) -> None:
+        for future in self.futures.values():
+            if not future.done():
+                future.set_exception(exc)
+        self.futures.clear()
+
+
+class BaseAgent:
+    """Mailbox + policy. Subclasses override ``handle_task``/``handle_query``."""
+
+    max_tool_rounds = 2
+
+    def __init__(
+        self,
+        spec: SubsystemSpec,
+        bus: Bus,
+        *,
+        llm: LLM,
+        tools: ToolRegistry,
+        settings: Settings,
+        store: StateStore,
+        metrics: Metrics,
+        known_agents: set[str] | None = None,
+        policy: PolicyEngine | None = None,
+        evidence: EvidenceChain | None = None,
+        approvals: Any | None = None,
+    ) -> None:
+        self.spec = spec
+        self.id = spec.id
+        self.bus = bus
+        self.llm = llm
+        self.tools = tools
+        self.settings = settings
+        self.store = store
+        self.metrics = metrics
+        self.known_agents = known_agents or set()
+        self.policy = policy
+        self.evidence = evidence
+        self.approvals = approvals
+        self.pending = Pending()
+        self._sem = asyncio.Semaphore(settings.max_concurrency)
+        self._tasks: set[asyncio.Task] = set()
+        self._loop_task: asyncio.Task | None = None
+        self._stopping = asyncio.Event()
+        self._started_at = 0.0
+
+    # -- lifecycle ----------------------------------------------------------
+    async def start(self) -> None:
+        await self.bus.subscribe(self.id, list(self.spec.subscribes))
+        self._started_at = time.monotonic()
+        self._loop_task = asyncio.create_task(self._run(), name=f"agent:{self.id}")
+        log("agent.started", agent=self.id, subscribes=self.spec.subscribes)
+
+    async def stop(self, *, grace_s: float = 5.0) -> None:
+        self._stopping.set()
+        if self._loop_task:
+            self._loop_task.cancel()
+            try:
+                await self._loop_task
+            except asyncio.CancelledError:
+                pass
+        if self._tasks:
+            _, pending = await asyncio.wait(self._tasks, timeout=grace_s)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        self.pending.fail_all(AgentError(ErrorCode.HANDLER.value, "agent stopping"))
+        log("agent.stopped", agent=self.id)
+
+    @property
+    def uptime_s(self) -> float:
+        return round(time.monotonic() - self._started_at, 1) if self._started_at else 0.0
+
+    async def _run(self) -> None:
+        with bound(agent=self.id):
+            while not self._stopping.is_set():
+                try:
+                    msg = await self.bus.receive(self.id, timeout=1.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log("agent.receive_failed", error=str(exc))
+                    await asyncio.sleep(0.2)
+                    continue
+                if msg is None:
+                    continue
+                await self._sem.acquire()
+                task = asyncio.create_task(self._process(msg), name=f"{self.id}:{msg.id[:8]}")
+                self._tasks.add(task)
+                task.add_done_callback(self._on_done)
+
+    def _on_done(self, task: asyncio.Task) -> None:
+        self._tasks.discard(task)
+        self._sem.release()
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            log("agent.task_crashed", error=repr(exc))
+
+    # -- dispatch -----------------------------------------------------------
+    async def _process(self, msg: Message) -> None:
+        with bound(agent=self.id):
+            try:
+                # Deadlines govern new work, not replies to work already done.
+                if msg.kind in ("task", "query") and msg.expired():
+                    await self._reject(msg, ErrorCode.DEADLINE, "message expired before processing")
+                    return
+                if isinstance(msg.payload, TaskSpec):
+                    await self._on_task(msg, msg.payload)
+                elif isinstance(msg.payload, Query):
+                    await self._on_query(msg, msg.payload)
+                elif isinstance(msg.payload, (TaskResult, QueryReply, Failure, Handoff)):
+                    self.pending.resolve(msg.correlation_id, msg.payload)
+                    await self.bus.ack(self.id, msg)
+                else:
+                    await self.bus.ack(self.id, msg)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # never lose a message to an unhandled error
+                log("agent.dispatch_failed", error=repr(exc), kind=msg.kind)
+                await self._reject(msg, ErrorCode.HANDLER, repr(exc))
+
+    async def _on_task(self, msg: Message, spec: TaskSpec) -> None:
+        # -- governance gate: no consequential action without a policy ALLOW --
+        decision: GovernanceDecision | None = None
+        try:
+            decision = await self._authorize(msg, spec)
+        except Exception as exc:
+            log("policy.error", error=repr(exc))
+            await self._reject(msg, "policy_error", f"policy evaluation failed: {exc}")
+            return
+        if decision is not None:
+            await self._audit("policy.decision", msg, decision.model_dump(mode="json"))
+            if decision.decision is DecisionType.HOLD:
+                self.metrics.inc("policy.hold")
+                await self.bus.ack(self.id, msg)
+                await self.bus.publish(
+                    msg.reply_with(
+                        Handoff(
+                            instruction=(
+                                f"Approval required: {decision.approval_ref}. "
+                                f"Approve with: python -m agents approve {decision.approval_ref}"
+                            ),
+                            reason="approval",
+                        )
+                    )
+                )
+                log("policy.hold", approval=decision.approval_ref, target=spec.target)
+                return
+            if decision.decision is DecisionType.DENY:
+                self.metrics.inc("policy.denied")
+                await self._reject(msg, "policy_denied", "; ".join(decision.reasons))
+                return
+
+        key = self._idempotency_key(msg, spec)
+        if key:
+            cached = await self.store.get(key)
+            if cached is not None:
+                self.metrics.inc("task.idempotent_hit")
+                await self.bus.ack(self.id, msg)
+                await self.bus.publish(msg.reply_with(TaskResult.model_validate(cached)))
+                return
+
+        started = time.perf_counter()
+        self.metrics.inc("task.received")
+        log("task.start", actor=msg.sender, objective=spec.objective, attempt=msg.attempt)
+        try:
+            result = await asyncio.wait_for(
+                self.handle_task(spec, msg), timeout=self.settings.task_timeout_s
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            self.metrics.inc("task.timeout")
+            await self._reject(msg, ErrorCode.TIMEOUT, f"exceeded {self.settings.task_timeout_s}s")
+            return
+        except RetryableError as exc:
+            if msg.attempt + 1 < self.settings.max_attempts:
+                self.metrics.inc("task.retried")
+                log("task.retry", reason=str(exc), attempt=msg.attempt + 1)
+                await self.bus.nack(self.id, msg, requeue=True)
+            else:
+                self.metrics.inc("task.failed")
+                await self._reject(msg, ErrorCode.HANDLER, f"gave up after {msg.attempt + 1} attempts: {exc}")
+            return
+        except Exception as exc:
+            self.metrics.inc("task.failed")
+            log("task.error", error=repr(exc))
+            await self._reject(msg, ErrorCode.HANDLER, f"{type(exc).__name__}: {exc}")
+            return
+
+        await self.bus.ack(self.id, msg)
+        if not isinstance(result, TaskResult):
+            # A subsystem may answer with Handoff (needs a human) or Failure.
+            self.metrics.inc("task.handoff" if isinstance(result, Handoff) else "task.failed")
+            await self.bus.publish(msg.reply_with(result))
+            return
+
+        if decision is not None and decision.authorization_ref:
+            evidence_ref = await self._audit(
+                "task.result",
+                msg,
+                {
+                    "objective": spec.objective,
+                    "target": spec.target,
+                    "ok": result.ok,
+                    "output": result.output[:2_000],
+                    "policy_ref": decision.policy_ref,
+                    "authorization_ref": decision.authorization_ref,
+                },
+            )
+            result = result.model_copy(
+                update={
+                    "policy_decision_ref": decision.policy_ref,
+                    "authorization_ref": decision.authorization_ref,
+                    "evidence_ref": evidence_ref,
+                }
+            )
+        if key:
+            await self.store.set(key, result.model_dump(mode="json"), ttl_s=3600)
+        self.metrics.inc("task.completed")
+        log(
+            "task.done",
+            actor=msg.sender,
+            ok=result.ok,
+            ms=int((time.perf_counter() - started) * 1000),
+            tokens=result.tokens_used,
+        )
+        await self.bus.publish(msg.reply_with(result))
+
+    async def _authorize(self, msg: Message, spec: TaskSpec) -> GovernanceDecision | None:
+        """Return a decision for consequential work, None for ordinary work."""
+        if self.policy is None:
+            # Fail closed: a missing policy engine must never let governed work
+            # through. Only read-only/recommend/simulate work is unaffected.
+            if spec.action_class in GOVERNED_ACTIONS:
+                self.metrics.inc("policy.denied")
+                return GovernanceDecision(
+                    decision=DecisionType.DENY,
+                    policy_ref="pol-unavailable",
+                    reasons=[
+                        "policy engine is not configured; governed actions are refused"
+                    ],
+                )
+            return None
+        if self.id == "cyber_strike":
+            violations = self.policy.screen_text(f"{spec.objective} {spec.target or ''}")
+            if violations:
+                self.metrics.inc("policy.denied")
+                return GovernanceDecision(
+                    decision=DecisionType.DENY,
+                    policy_ref=self.policy.policy_ref(spec.action_class, spec.target, spec.risk),
+                    reasons=[f"defensive-only boundary: prohibited intent ({', '.join(violations)})"],
+                )
+        if spec.action_class not in GOVERNED_ACTIONS:
+            return None
+        return await self.policy.evaluate(
+            action=spec.action_class,
+            target=spec.target,
+            risk=spec.risk,
+            mission_id=spec.mission_id or msg.mission_id,
+            classification=msg.classification,
+            approval_ref=spec.approval_ref,
+            requested_by=msg.sender,
+            justification=spec.justification or spec.objective,
+            correlation_id=msg.correlation_id,
+        )
+
+    async def _audit(self, kind: str, msg: Message, data: dict[str, Any]) -> str | None:
+        if self.evidence is None:
+            return None
+        record = await self.evidence.append(
+            kind=kind,
+            actor=self.id,
+            subsystem=self.id,
+            correlation_id=msg.correlation_id,
+            mission_id=msg.mission_id,
+            classification=msg.classification.value,
+            data=data,
+        )
+        return record.id
+
+    async def _on_query(self, msg: Message, query: Query) -> None:
+        try:
+            reply = await asyncio.wait_for(self.handle_query(query, msg), timeout=self.settings.task_timeout_s)
+        except Exception as exc:
+            await self._reject(msg, ErrorCode.HANDLER, f"query failed: {exc}")
+            return
+        await self.bus.ack(self.id, msg)
+        await self.bus.publish(msg.reply_with(reply))
+
+    async def _reject(self, msg: Message, code: ErrorCode | str, detail: str) -> None:
+        await self.bus.ack(self.id, msg)
+        payload = Failure(
+            code=str(code.value if isinstance(code, ErrorCode) else code),
+            message=detail,
+            retryable=False,
+        )
+        # Only work requests get a failure reply; never bounce errors off replies.
+        if msg.kind in ("task", "query"):
+            await self.bus.publish(msg.reply_with(payload))
+        log("task.rejected", code=payload.code, detail=detail)
+
+    def _idempotency_key(self, msg: Message, spec: TaskSpec) -> str | None:
+        if not spec.idempotency_key:
+            return None
+        # Scope the cache to the agent, sender, tenant and mission. A shared
+        # store must never let one agent or tenant replay another's result.
+        material = "|".join(
+            [
+                self.id,
+                msg.sender,
+                spec.idempotency_key,
+                spec.objective,
+                spec.tenant_id or msg.tenant_id or "",
+                spec.mission_id or msg.mission_id or "",
+            ]
+        )
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+        return f"task:{digest}"
+
+    # -- domain hooks -------------------------------------------------------
+    async def handle_task(self, spec: TaskSpec, msg: Message) -> TaskResult | Handoff | Failure:
+        """Default implementation: one bounded LLM call with optional tool rounds."""
+        system = TASK_SYSTEM.format(
+            name=self.spec.name,
+            count=len(self.known_agents) or 9,
+            description=self.spec.description,
+            capabilities="; ".join(self.spec.capabilities),
+            tools=json.dumps(self.tools.describe(self.spec.tools)) if self.spec.tools else "none",
+        )
+        tool_results: list[dict[str, Any]] = []
+        tokens = 0
+        budget = spec.budget_tokens or self.settings.max_tokens_per_step
+        expected = Outcome.model_json_schema()
+
+        for round_no in range(self.max_tool_rounds + 1):
+            final_round = round_no == self.max_tool_rounds
+            user = json.dumps(
+                {
+                    "objective": spec.objective,
+                    "inputs": spec.inputs,
+                    "expected": spec.expected,
+                    "tool_results": tool_results,
+                    **({"instruction": "Final answer required. Return the JSON outcome now."} if final_round else {}),
+                },
+                default=str,
+            )
+            try:
+                resp = await self.llm.complete(
+                    system=system,
+                    messages=[{"role": "user", "content": user}],
+                    json_schema=expected if final_round else None,
+                    model=self.settings.model_fast if self.spec.model_tier == "fast" else self.settings.model,
+                    max_tokens=min(4_000, max(512, budget - tokens)),
+                )
+            except Exception as exc:
+                raise RetryableError(f"model call failed: {exc}") from exc
+
+            tokens += resp.tokens
+            data = resp.data or {}
+            if not final_round and data.get("tool_name"):
+                tool_results.append(await self._run_tool(data))
+                continue
+            if not final_round and not data:
+                continue
+            return self._to_result(resp.text, data, tokens, budget)
+
+        return TaskResult(ok=False, error="no outcome produced", tokens_used=tokens)
+
+    async def _run_tool(self, call: dict[str, Any]) -> dict[str, Any]:
+        name = str(call.get("tool_name"))
+        if name not in self.spec.tools:
+            return {"tool": name, "error": "not permitted for this subsystem"}
+        self.metrics.inc("tool.called")
+        log("tool.call", tool=name)
+        try:
+            value = await self.tools.call(name, call.get("arguments") or {})
+            return {"tool": name, "result": value}
+        except ToolError as exc:
+            return {"tool": name, "error": str(exc)}
+
+    def _to_result(self, text: str, data: dict[str, Any], tokens: int, budget: int) -> TaskResult:
+        outcome: Outcome | None = None
+        try:
+            outcome = Outcome.model_validate(data)
+        except ValidationError:
+            outcome = None
+        if outcome is None:
+            return TaskResult(ok=True, output=text.strip()[:8_000], tokens_used=tokens)
+        result = TaskResult(
+            ok=True,
+            output=outcome.summary[:8_000],
+            data={**outcome.data, "confidence": outcome.confidence, "needs": outcome.needs},
+            artifacts=outcome.artifacts,
+            tokens_used=tokens,
+        )
+        if tokens > budget:
+            result.data["budget_exceeded"] = True
+            self.metrics.inc("task.budget_exceeded")
+        return result
+
+    async def handle_query(self, query: Query, msg: Message) -> QueryReply:
+        system = QUERY_SYSTEM.format(name=self.spec.name)
+        user = json.dumps({"question": query.question, "context": query.context}, default=str)
+        try:
+            resp = await self.llm.complete(
+                system=system,
+                messages=[{"role": "user", "content": user}],
+                model=self.settings.model_fast,
+                max_tokens=600,
+            )
+        except Exception as exc:
+            raise RetryableError(f"model call failed: {exc}") from exc
+        return QueryReply(answer=resp.text.strip()[:4_000])
+
+    # -- collaboration helpers ---------------------------------------------
+    async def delegate(
+        self,
+        recipient: str,
+        objective: str,
+        *,
+        inputs: dict[str, Any] | None = None,
+        expected: str | None = None,
+        timeout_s: float | None = None,
+        idempotency_key: str | None = None,
+        action_class: ActionClass = ActionClass.READ_ONLY,
+        target: str | None = None,
+        risk: RiskLevel = RiskLevel.LOW,
+        approval_ref: str | None = None,
+        justification: str | None = None,
+        mission_id: str | None = None,
+    ) -> TaskResult:
+        self._require_known(recipient)
+        msg = Message.task(
+            sender=self.id,
+            recipient=recipient,
+            objective=objective,
+            inputs=inputs,
+            expected=expected,
+            budget_tokens=self.settings.max_tokens_per_step,
+            idempotency_key=idempotency_key,
+            action_class=action_class,
+            target=target,
+            risk=risk,
+            approval_ref=approval_ref,
+            justification=justification,
+            mission_id=mission_id,
+        )
+        payload = await self._request(msg, timeout_s)
+        if isinstance(payload, Failure):
+            raise AgentError(payload.code, payload.message)
+        if isinstance(payload, Handoff):
+            raise AgentError("handoff", payload.instruction)
+        return payload
+
+    async def ask(self, recipient: str, question: str, *, context: dict[str, Any] | None = None, timeout_s: float | None = None) -> QueryReply:
+        self._require_known(recipient)
+        msg = Message(
+            sender=self.id,
+            recipient=recipient,
+            topic=f"inbox.{recipient}",
+            payload=Query(question=question, context=context or {}),
+        )
+        payload = await self._request(msg, timeout_s)
+        if isinstance(payload, Failure):
+            raise AgentError(payload.code, payload.message)
+        return payload
+
+    async def _request(self, msg: Message, timeout_s: float | None) -> Any:
+        future = self.pending.expect(msg.correlation_id)
+        await self.bus.publish(msg)
+        limit = timeout_s or self.settings.task_timeout_s
+        try:
+            return await asyncio.wait_for(future, timeout=limit)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            self.pending.discard(msg.correlation_id)
+            self.metrics.inc("request.timeout")
+            raise AgentError(ErrorCode.TIMEOUT.value, f"{msg.recipient} did not answer within {limit}s") from exc
+
+    def _require_known(self, recipient: str) -> None:
+        if recipient == self.id:
+            raise AgentError(ErrorCode.BAD_PLAN.value, "agent cannot delegate to itself")
+        if self.known_agents and recipient not in self.known_agents:
+            raise AgentError(ErrorCode.NO_AGENT.value, f"unknown agent: {recipient}")
+
+    async def emit(self, name: str, data: dict[str, Any] | None = None) -> None:
+        await self.bus.publish(Message.event(sender=self.id, name=name, data=data))
+
+
+class SubsystemAgent(BaseAgent):
+    """Default agent. Override methods to add deterministic domain logic."""

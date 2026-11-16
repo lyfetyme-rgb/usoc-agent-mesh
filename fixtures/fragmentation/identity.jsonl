@@ -1,0 +1,1 @@
+{"id":"idn-8821","timestamp":"2026-11-14T11:04:00Z","entity":"svc-edge-02","entity_type":"service","aliases":["edge-02"],"severity":"high","category":"authentication_anomaly","title":"Service account burst of failed logins","failures":412}

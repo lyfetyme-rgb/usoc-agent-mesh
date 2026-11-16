@@ -1,0 +1,2 @@
+{"id":"bkp-771","timestamp":"2026-11-14T11:08:00Z","entity":"edge-02","entity_type":"host","severity":"high","category":"backup_failure","title":"Backup snapshot failed for edge-02","snapshot":"snap-771"}
+{"id":"bkp-772","timestamp":"2026-11-14T11:08:30Z","entity":"db-02","entity_type":"host","severity":"low","category":"backup_success","title":"Backup completed for db-02"}

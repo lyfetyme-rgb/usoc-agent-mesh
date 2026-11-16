@@ -1,0 +1,1 @@
+{"id":"cost-anom-77","timestamp":"2026-11-14T11:02:00Z","entity":"svc-edge-02","entity_type":"service","aliases":["edge-02","i-0abc123"],"severity":"high","category":"cost_anomaly","title":"Egress spend 6x baseline for svc-edge-02","delta_usd":1420.5}

@@ -1,0 +1,2 @@
+{"id":"obs-9001","timestamp":"2026-11-14T11:00:00Z","entity":"edge-02","entity_type":"host","aliases":["i-0abc123","svc-edge-02"],"severity":"high","category":"resource_saturation","title":"CPU and memory saturation on edge-02","cpu":0.97,"mem":0.91,"net_ms":310}
+{"id":"obs-9002","timestamp":"2026-11-14T11:00:30Z","entity":"edge-09","entity_type":"host","severity":"high","category":"resource_saturation","title":"CPU saturation on edge-09","cpu":0.93}

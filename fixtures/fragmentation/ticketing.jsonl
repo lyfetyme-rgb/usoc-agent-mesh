@@ -1,0 +1,2 @@
+{"id":"ticket-4512","timestamp":"2026-11-14T11:07:00Z","entity":"edge-02","entity_type":"host","severity":"medium","category":"incident_ticket","title":"Incident open for edge-02 degradation","ticket_id":"INC-4512"}
+{"id":"ticket-4599","timestamp":"2026-11-14T11:07:30Z","entity":"printer-3","entity_type":"host","severity":"low","category":"service_request","title":"Printer queue request","ticket_id":"REQ-4599"}

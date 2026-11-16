@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets and local runtime state
+secrets/
+.env
+.env.docker
+*.env
+workspace/
+workspace-frag/
+
+# Docker volumes / data
+data/
+
+# Separate project
+h-lift/
+
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

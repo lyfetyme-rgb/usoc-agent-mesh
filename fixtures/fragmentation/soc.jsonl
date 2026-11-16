@@ -1,0 +1,1 @@
+{"id":"soc-3310","timestamp":"2026-11-14T11:03:00Z","entity":"edge-02","entity_type":"host","severity":"critical","category":"c2_beacon","title":"Outbound C2 beacon detected from edge-02","containment_target":"sandbox/edge-02","remote_ip":"203.0.113.44"}

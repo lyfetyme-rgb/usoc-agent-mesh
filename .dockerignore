@@ -1,0 +1,24 @@
+# Never bake local state, secrets or test output into an image.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+.env
+.env.*
+!.env.docker.example
+
+secrets
+workspace
+tests
+docs
+*.md
+!README.md
