@@ -30,6 +30,10 @@ from .security import Signer
 STREAM_PREFIX = "mesh:"
 
 
+class ConfigurationError(ValueError):
+    """Raised when the bus is constructed without required ACL configuration."""
+
+
 @runtime_checkable
 class Bus(Protocol):
     async def subscribe(self, agent: str, topics: list[str]) -> None: ...
@@ -410,6 +414,11 @@ def build_bus(
     insecure_dev_mode: bool = False,
     sender_verifier: Any = None,
 ) -> Bus:
+    if publish_acl is None and subscribe_acl is None and not insecure_dev_mode:
+        raise ConfigurationError(
+            "build_bus requires publish_acl/subscribe_acl in production; "
+            "pass insecure_dev_mode=True only for development"
+        )
     if settings.bus == "redis":
         return RedisBus(
             settings.redis_url,
