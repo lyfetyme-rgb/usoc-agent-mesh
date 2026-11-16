@@ -1,0 +1,181 @@
+name: usoc-mesh-scaled
+
+# Horizontal scaling example: one control-plane process (all agents, with the
+# orchestrator) plus N stateless workers pinned to specific subsystems.
+# Every process shares the same Redis streams (consumer groups), the same shared
+# workspace (approvals file + evidence chain), and the same secrets.
+#
+# Run with:
+#   docker compose -f docker-compose.workers.example.yml --env-file .env.docker up -d --build
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.docker}
+      - --appendonly
+      - "yes"
+      - --save
+      - ""
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    networks:
+      - internal
+    security_opt:
+      - no-new-privileges:true
+
+  mesh:
+    build: .
+    image: usoc-mesh:local
+    restart: unless-stopped
+    command: python -m agents serve --host 0.0.0.0 --port 8080
+    depends_on:
+      redis:
+        condition: service_started
+    environment:
+      AGENT_BUS: redis
+      AGENT_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.docker}@redis:6379/0
+      AGENT_SHARED_SECRET_FILE: /run/secrets/agent_shared_secret
+      AGENT_HEALTH_TOKEN_FILE: /run/secrets/health_token
+      AGENT_HEALTH_HOST: 0.0.0.0
+      AGENT_HEALTH_PORT: "8080"
+      AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
+      AGENT_APPROVERS: ${AGENT_APPROVERS:?set AGENT_APPROVERS in .env.docker}
+      AGENT_LOG_JSON: "true"
+    secrets:
+      - agent_shared_secret
+      - health_token
+    volumes:
+      - mesh-data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - internal
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+
+  oekp-worker-1:
+    build: .
+    image: usoc-mesh:local
+    restart: unless-stopped
+    command: python -m agents worker --agents oekp --host 0.0.0.0 --port 8091
+    depends_on:
+      - mesh
+    environment:
+      AGENT_BUS: redis
+      AGENT_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.docker}@redis:6379/0
+      AGENT_SHARED_SECRET_FILE: /run/secrets/agent_shared_secret
+      AGENT_HEALTH_TOKEN_FILE: /run/secrets/health_token
+      AGENT_HEALTH_HOST: 0.0.0.0
+      AGENT_HEALTH_PORT: "8091"
+      AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
+      AGENT_APPROVERS: ${AGENT_APPROVERS:?set AGENT_APPROVERS in .env.docker}
+      AGENT_LOG_JSON: "true"
+    secrets:
+      - agent_shared_secret
+    volumes:
+      - mesh-data:/data
+    networks:
+      - internal
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+
+  oekp-worker-2:
+    build: .
+    image: usoc-mesh:local
+    restart: unless-stopped
+    command: python -m agents worker --agents oekp --host 0.0.0.0 --port 8092
+    depends_on:
+      - mesh
+    environment:
+      AGENT_BUS: redis
+      AGENT_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.docker}@redis:6379/0
+      AGENT_SHARED_SECRET_FILE: /run/secrets/agent_shared_secret
+      AGENT_HEALTH_TOKEN_FILE: /run/secrets/health_token
+      AGENT_HEALTH_HOST: 0.0.0.0
+      AGENT_HEALTH_PORT: "8092"
+      AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
+      AGENT_APPROVERS: ${AGENT_APPROVERS:?set AGENT_APPROVERS in .env.docker}
+      AGENT_LOG_JSON: "true"
+    secrets:
+      - agent_shared_secret
+    volumes:
+      - mesh-data:/data
+    networks:
+      - internal
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+
+  bengal-worker:
+    build: .
+    image: usoc-mesh:local
+    restart: unless-stopped
+    command: python -m agents worker --agents bengal --host 0.0.0.0 --port 8093
+    depends_on:
+      - mesh
+    environment:
+      AGENT_BUS: redis
+      AGENT_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.docker}@redis:6379/0
+      AGENT_SHARED_SECRET_FILE: /run/secrets/agent_shared_secret
+      AGENT_HEALTH_TOKEN_FILE: /run/secrets/health_token
+      AGENT_HEALTH_HOST: 0.0.0.0
+      AGENT_HEALTH_PORT: "8093"
+      AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
+      AGENT_APPROVERS: ${AGENT_APPROVERS:?set AGENT_APPROVERS in .env.docker}
+      AGENT_LOG_JSON: "true"
+    secrets:
+      - agent_shared_secret
+    volumes:
+      - mesh-data:/data
+    networks:
+      - internal
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+
+networks:
+  internal:
+    internal: true
+  egress:
+
+volumes:
+  redis-data:
+  mesh-data:
+
+secrets:
+  agent_shared_secret:
+    file: ./secrets/agent_shared_secret.txt
+  health_token:
+    file: ./secrets/health_token.txt

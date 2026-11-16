@@ -26,7 +26,7 @@ from .observability import Metrics, configure_logging, log
 from .orchestrator import LLMPlanner, Orchestrator, Planner, RouterPlanner
 from .registry import Registry, load_registry
 from .runtime import SubsystemAgent
-from .security import Signer, build_signer, configured_approvers
+from .security import SecurityError, Signer, build_signer, configured_approvers
 from .shell import Shell
 from .store import InMemoryStore, RedisStore, StateStore
 from .tools import build_default_tools
@@ -54,6 +54,8 @@ class Mesh:
         approvals: ApprovalStore | None = None,
         fragmentation: FragmentationService | None = None,
         workspace_subdir: str = "",
+        agents: list[str] | None = None,
+        run_orchestrator: bool = True,
     ) -> None:
         self.settings = settings or get_settings()
         self._registry_path = Path(registry_path or self.settings.subsystems_file)
@@ -64,6 +66,8 @@ class Mesh:
         self._approvals_override = approvals
         self._fragmentation_override = fragmentation
         self._workspace = self.settings.workspace / workspace_subdir if workspace_subdir else self.settings.workspace
+        self._agents_filter = [a.strip() for a in agents] if agents else None
+        self._run_orchestrator = run_orchestrator
 
         self.bus: Bus | None = None
         self.llm: LLM | None = None
@@ -147,15 +151,24 @@ class Mesh:
                     self.fragmentation_error = f"{type(exc).__name__}: {exc}"
                     log("fragmentation.disabled", error=self.fragmentation_error)
 
-        self.orchestrator = Orchestrator(
-            self.bus,
-            self.registry,
-            self._planner_override or self._default_planner(),
-            self.settings,
-            self.metrics,
-            mission_id=self.settings.mission_id,
-        )
+        if self._run_orchestrator:
+            self.orchestrator = Orchestrator(
+                self.bus,
+                self.registry,
+                self._planner_override or self._default_planner(),
+                self.settings,
+                self.metrics,
+                mission_id=self.settings.mission_id,
+            )
         known = set(self.registry.by_id)
+        specs = list(self.registry.subsystems)
+        if self._agents_filter is not None:
+            unknown = sorted(set(self._agents_filter) - known)
+            if unknown:
+                raise SecurityError(
+                    f"AGENT worker agents not in registry: {', '.join(unknown)}"
+                )
+            specs = [spec for spec in specs if spec.id in self._agents_filter]
         self.agents = {
             spec.id: AGENT_CLASSES.get(spec.id, SubsystemAgent)(
                 spec,
@@ -170,7 +183,7 @@ class Mesh:
                 evidence=self.evidence,
                 approvals=self.approvals,
             )
-            for spec in self.registry.subsystems
+            for spec in specs
         }
         self.shell = Shell(
             self.registry,
@@ -182,7 +195,8 @@ class Mesh:
             fragmentation_error=self.fragmentation_error,
         )
 
-        await self.orchestrator.start()
+        if self.orchestrator is not None:
+            await self.orchestrator.start()
         await asyncio.gather(*(agent.start() for agent in self.agents.values()))
         self._started = True
         log(
@@ -191,7 +205,7 @@ class Mesh:
             roles=self.registry.roles_total,
             bus=type(self.bus).__name__,
             model=getattr(self.llm, "model", "?"),
-            planner=type(self.orchestrator.planner).__name__,
+            planner=type(self.orchestrator.planner).__name__ if self.orchestrator is not None else "disabled",
             message_auth=self.signer is not None,
             approvers=len(configured_approvers(self.settings)),
         )
@@ -233,7 +247,11 @@ class Mesh:
     async def run(self, goal: str, mission_id: str | None = None) -> GoalResult:
         if not self._started:
             await self.start()
-        assert self.orchestrator is not None
+        if self.orchestrator is None:
+            raise RuntimeError(
+                "this mesh is running in worker mode (no orchestrator); "
+                "run `agents serve` on the control plane"
+            )
         if mission_id:
             self.orchestrator.mission_id = mission_id
         return await self.orchestrator.run(goal)
@@ -300,4 +318,6 @@ class Mesh:
                 self.fragmentation.describe() if self.fragmentation is not None else None
             ),
             "fragmentation_error": self.fragmentation_error,
+            "running_agents": sorted(self.agents),
+            "orchestrator": self.orchestrator is not None,
         }

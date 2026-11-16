@@ -406,23 +406,31 @@ entry point change.
 
 ## 12. Scaling out
 
-Today `Mesh` runs all nine coordinators in one event loop. The contract already
-supports process boundaries because nothing shares memory:
+`Mesh` runs all nine coordinators in one event loop by default. It also supports
+process boundaries with nothing shared in memory, and now has a worker entry
+point:
 
-1. Run `AGENT_BUS=redis` and start one process per agent id
-   (`python -m agents serve` with a per-agent card subset, or a small worker
-   entry point).
+1. `python -m agents worker --agents oekp,bengal --port 8091` starts only those
+   subsystems, without the orchestrator, and exposes its own `/health` and
+   `/ready`. `python -m agents serve --agents … --no-orchestrator` is the
+   equivalent on the full-service path. Unknown subsystem ids fail closed.
 2. Use the same consumer group for replicas of one agent; Redis splits the
-   stream between them.
-3. Call `RedisBus.reclaim_stale(agent)` on startup to recover a crashed
-   worker's pending messages.
-4. Keep the orchestrator stateless per goal; it already keys everything by
+   stream between them, and `reclaim_stale(agent)` recovers a crashed worker's
+   pending messages.
+3. `RedisStore` is shared across replicas, so a redelivered task produces one
+   handler execution.
+4. Multiple workers may append to the same evidence chain: the appender
+   re-reads the tail under the shared file lock before writing, so concurrent
+   processes cannot fork the chain.
+5. Keep the orchestrator stateless per goal; it already keys everything by
    trace id.
-5. Move `StateStore` to Redis (already provided) so idempotency survives
-   restarts.
-6. Move `FileApprovalStore` to a transactional store with authenticated
-   approver identities before production.
+6. Move `FileApprovalStore` to a transactional multi-host store with
+   authenticated approver identities before production on multiple machines.
+   On one host the approval file is already serialized through the same lock.
 7. Ship the evidence chain to immutable storage and sign the head.
+
+A complete example is in `docker-compose.workers.example.yml`: one control
+plane plus three workers with a shared workspace volume.
 
 Partitioning rule of thumb: scale the agents with the most fan-in (SERAPHIM,
 OEKP, HITL first), not all nine equally.
@@ -484,7 +492,7 @@ governance to land before higher-risk autonomy.
 | C — Communication architecture | `contracts.py`, `bus.py`, this document | Protobuf/gRPC, authenticated service identity |
 | D — Implementation blueprint | package layout and composition root | service boundaries for role workers |
 | E — Security and governance | `governance.py`, `evidence.py`, `security.py`, `usoc_agents.py` | OPA/Rego, per-agent keys, signed authorization artifacts |
-| F — Test and verification | 177 tests across contracts, bus, runtime, routing, governance, security | integration, performance, fault-injection suites |
+| F — Test and verification | 181 tests across contracts, bus, runtime, routing, governance, security | integration, performance, fault-injection suites |
 | G — Phased roadmap | phases below | resource and delivery schedule |
 | H — Operational readiness | `health` and diagnostics | evidence-backed maturity assessment per subsystem |
 

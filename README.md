@@ -38,7 +38,7 @@ python -m agents demo            # one governed goal end to end
 python -m agents health          # SHELL health + diagnostics
 python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
-python -m pytest -q              # 177 tests, no network
+python -m pytest -q              # 181 tests, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
@@ -62,7 +62,7 @@ the bridge is opt-in and its tests use an injected HTTP transport.
 
 | Time | Show | Point |
 |---|---|---|
-| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Three commits: offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge. Clean remote, 177 tests passing. |
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Three commits: offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge. Clean remote, 181 tests passing. |
 | 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
 | 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
 | 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |
@@ -480,6 +480,48 @@ To run without Docker, install a local Redis with a password, set
 `AGENT_BUS=redis`, `AGENT_REDIS_URL=redis://:PASSWORD@localhost:6379/0` and
 `AGENT_SHARED_SECRET`, then `python -m agents serve`.
 
+## Horizontal scaling
+
+The mesh scales across processes by sharing Redis and one workspace. Nothing is
+shared in memory.
+
+```powershell
+# control plane: all nine coordinators + the orchestrator
+python -m agents serve --host 0.0.0.0 --port 8080
+
+# workers: only the subsystems you want more of, no orchestrator
+python -m agents worker --agents oekp --port 8091
+python -m agents worker --agents oekp --port 8092
+python -m agents worker --agents bengal --port 8093
+```
+
+Start multiple workers with the same `--agents` and different ports; the bus
+delivers each message to exactly one replica via the per-agent consumer group.
+Worker processes do not plan work: they consume, apply the policy gate, ask
+peers, write evidence, and get out.
+
+* **Idempotency** — `RedisStore` is shared across replicas, so a redelivered
+  task produces one handler execution even with several workers on the same
+  agent.
+* **Evidence** — the append protocol re-reads the chain tail under the file
+  lock before writing, so concurrent appenders on a shared volume cannot fork
+  the chain (`test_two_processes_appending_to_the_same_chain_do_not_fork`).
+* **Approvals** — `FileApprovalStore` serializes decisions through the same
+  file lock, so two replicas cannot both approve the same request.
+* **Cleanup** — `serve` and `worker` both run `reclaim_stale()`, recover a
+  dead worker's pending messages, handle SIGINT/SIGTERM, and expose `/health`
+  and `/ready` on their own port.
+
+`docker-compose.workers.example.yml` shows the shape with a control plane and
+three workers. Shared state lives on the `mesh-data` volume; Redis streams
+split the load; unknown subsystem ids fail closed in `worker`.
+
+Still single-host by design: approvals are a locked JSON file and evidence is
+a JSONL chain on one volume. Moving to multiple machines means a transactional
+approval store and immutable evidence storage — see
+[PLAYBOOK](toolbox/PLAYBOOK.md) and the "Scaling out" notes in
+[docs/architecture.md](docs/architecture.md).
+
 ## Layout
 
 ```
@@ -504,6 +546,7 @@ docs/architecture.md
 subsystems.yaml
 Dockerfile
 docker-compose.yml
+docker-compose.workers.example.yml
 SECURITY.md
 toolbox/           PLAYBOOK, CONSTITUTION (SpecKit-style SDLC), templates, scripts, docs index
 tests/

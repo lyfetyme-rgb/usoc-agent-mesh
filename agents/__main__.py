@@ -1,4 +1,4 @@
-"""CLI: python -m agents {demo,list,doctor,integrity,keygen,sign-config,serve,probe,health,approvals,approve,deny,publish-decision,ingest,demo-fragmentation}
+"""CLI: python -m agents {demo,list,doctor,integrity,keygen,sign-config,serve,worker,probe,health,approvals,approve,deny,publish-decision,ingest,demo-fragmentation}
 
     python -m agents demo "Collect edge telemetry, analyse anomalies, record evidence"
     python -m agents list
@@ -422,6 +422,13 @@ async def _run_serve(args: argparse.Namespace) -> int:
         settings = settings.model_copy(update={"health_host": args.host})
     if getattr(args, "port", None) is not None:
         settings = settings.model_copy(update={"health_port": args.port})
+    agent_ids = None
+    raw_agents = getattr(args, "agents", None)
+    if raw_agents:
+        agent_ids = [item.strip() for item in raw_agents.split(",") if item.strip()]
+    no_orchestrator = bool(getattr(args, "no_orchestrator", False))
+    if getattr(args, "worker", False):
+        no_orchestrator = not bool(getattr(args, "with_orchestrator", False))
     token = read_secret(settings.health_token, settings.health_token_file)
     admin_token = read_secret(settings.admin_token, settings.admin_token_file)
     if token and admin_token and token == admin_token:
@@ -430,7 +437,7 @@ async def _run_serve(args: argparse.Namespace) -> int:
             "the probe credential must not open the diagnostics surface"
         )
 
-    mesh = Mesh(settings)
+    mesh = Mesh(settings, agents=agent_ids, run_orchestrator=not no_orchestrator)
     await mesh.start()
     assert mesh.shell is not None
     server: HealthServer | None = None
@@ -462,7 +469,10 @@ async def _run_serve(args: argparse.Namespace) -> int:
         )
         await server.start()
         print(
-            f"mesh running: {len(mesh.agents)} agents, bus={type(mesh.bus).__name__}, "
+            f"mesh running: {len(mesh.agents)} agents"
+            + (f" ({','.join(sorted(mesh.agents))})" if agent_ids else "")
+            + f", orchestrator={'on' if mesh.orchestrator is not None else 'off'}, "
+            f"bus={type(mesh.bus).__name__}, "
             f"auth={'on' if mesh.signer is not None else 'OFF'}, "
             f"health=http://{settings.health_host}:{server.port}/health, "
             f"diagnostics={'on' if admin_token else 'disabled'}"
@@ -762,6 +772,18 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="start the mesh, health endpoint and recovery loop")
     serve.add_argument("--host", help="health bind address (default AGENT_HEALTH_HOST)")
     serve.add_argument("--port", type=int, help="health port (default AGENT_HEALTH_PORT)")
+    serve.add_argument("--agents", help="comma-separated subsystem ids to run (default: all nine)")
+    serve.add_argument(
+        "--no-orchestrator", action="store_true",
+        help="run subsystem agents only; the control plane keeps the orchestrator",
+    )
+    worker = sub.add_parser(
+        "worker", help="run selected subsystems as a stateless worker (no orchestrator)"
+    )
+    worker.add_argument("--agents", help="comma-separated subsystem ids (e.g. 'oekp,bengal')")
+    worker.add_argument("--with-orchestrator", action="store_true", help="also run the orchestrator (not recommended on workers)")
+    worker.add_argument("--host", help="health bind address (default AGENT_HEALTH_HOST)")
+    worker.add_argument("--port", type=int, help="health port (default AGENT_HEALTH_PORT)")
     probe = sub.add_parser("probe", help="check a running mesh health endpoint")
     probe.add_argument("--url", help="health URL (default from settings)")
     probe.add_argument("--token", help="bearer token (default AGENT_HEALTH_TOKEN)")
@@ -827,6 +849,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "demo":
             return asyncio.run(_run_demo(args))
         if args.command == "serve":
+            return asyncio.run(_run_serve(args))
+        if args.command == "worker":
+            args.worker = True
             return asyncio.run(_run_serve(args))
         if args.command == "health":
             return cmd_health(args)

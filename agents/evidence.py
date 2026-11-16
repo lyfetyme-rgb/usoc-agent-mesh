@@ -58,30 +58,43 @@ class EvidenceChain:
         self._last_hash = "genesis"
         self._loaded = False
 
+    def _tail(self) -> tuple[int, str]:
+        """Best-effort read of the last record, without full verification."""
+        if not self.path.is_file():
+            return 0, "genesis"
+        last: EvidenceRecord | None = None
+        try:
+            with self.path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        last = EvidenceRecord.model_validate_json(line)
+                    except ValueError:
+                        # Fail closed; the full verification on read will say why.
+                        return -1, "corrupt"
+        except OSError:
+            return -1, "corrupt"
+        if last is None:
+            return 0, "genesis"
+        return last.seq, last.hash
+
     def _load(self) -> None:
         if self._loaded:
             return
         self._loaded = True
         if not self.path.is_file():
             return
-        last: EvidenceRecord | None = None
-        with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    last = EvidenceRecord.model_validate_json(line)
-                except ValueError:
-                    # Fail closed: a corrupt chain is not silently skipped.
-                    raise RuntimeError("evidence chain contains an invalid record")
-        if last:
-            self._seq = last.seq
-            self._last_hash = last.hash
-        # Verify integrity on load.
+        seq, last_hash = self._tail()
+        if seq == -1:
+            raise RuntimeError("evidence chain contains an invalid record")
+        self._seq = seq
+        self._last_hash = last_hash
         ok, detail = self.verify()
         if not ok:
             raise RuntimeError(f"evidence chain verification failed: {detail}")
+
 
     async def append(
         self,
@@ -96,24 +109,30 @@ class EvidenceChain:
     ) -> EvidenceRecord:
         async with self._lock:
             self._load()
-            record = EvidenceRecord(
-                seq=self._seq + 1,
-                id=f"ev-{uuid.uuid4().hex[:12]}",
-                kind=kind,
-                actor=actor,
-                subsystem=subsystem,
-                correlation_id=correlation_id,
-                mission_id=mission_id,
-                classification=classification,
-                data=data or {},
-                prev_hash=self._last_hash,
-            )
-            record.hash = record.compute_hash()
-            if self.signer is not None:
-                record.mac = self.signer.sign_record(
-                    "evidence", record.model_dump(mode="json", exclude={"mac"})
-                )
             with exclusive_lock(self.path, timeout_s=10.0):
+                # Another process may have appended since we loaded; catch up
+                # under the shared file lock before forking the chain.
+                seq, last_hash = self._tail()
+                if seq == -1:
+                    raise RuntimeError("evidence chain contains an invalid record")
+                self._seq, self._last_hash = seq, last_hash
+                record = EvidenceRecord(
+                    seq=self._seq + 1,
+                    id=f"ev-{uuid.uuid4().hex[:12]}",
+                    kind=kind,
+                    actor=actor,
+                    subsystem=subsystem,
+                    correlation_id=correlation_id,
+                    mission_id=mission_id,
+                    classification=classification,
+                    data=data or {},
+                    prev_hash=self._last_hash,
+                )
+                record.hash = record.compute_hash()
+                if self.signer is not None:
+                    record.mac = self.signer.sign_record(
+                        "evidence", record.model_dump(mode="json", exclude={"mac"})
+                    )
                 with self.path.open("a", encoding="utf-8") as fh:
                     fh.write(record.model_dump_json() + "\n")
                     fh.flush()
