@@ -32,7 +32,7 @@ GOVERNED = frozenset({ActionClass.EXECUTE, ActionClass.CONTAIN})
 AUTHORIZATION_TTL_S = 900
 
 # Defensive-only boundary from the USOC master prompt. These are screening
-# signals for the CYBER STRIKE subsystem, not a content filter.
+# signals for the CYBER DEFENSE subsystem, not a content filter.
 PROHIBITED_PATTERNS = (
     "credential theft",
     "steal credentials",
@@ -65,6 +65,8 @@ class GovernanceDecision(BaseModel):
     approval_ref: str | None = None
     authorization_ref: str | None = None
     expires_at: datetime | None = None
+    provenance: list[str] = Field(default_factory=list)
+    tainted: bool = False
 
     @property
     def allowed(self) -> bool:
@@ -93,6 +95,10 @@ class ApprovalRequest(BaseModel):
     decided_by: str | None = None
     decided_at: datetime | None = None
     note: str | None = None
+    # Taint disclosure: the human approving this action must see which upstream
+    # subsystems produced it and that untrusted telemetry is in the chain.
+    provenance: list[str] = Field(default_factory=list, max_length=32)
+    tainted: bool = False
     # HMAC over the canonical record. Unsigned or tampered records never grant.
     signature: str | None = Field(default=None, max_length=128)
 
@@ -382,9 +388,12 @@ class PolicyEngine:
         requested_by: str,
         justification: str = "",
         correlation_id: str = "",
+        provenance: list[str] | None = None,
+        tainted: bool = False,
     ) -> GovernanceDecision:
         ref = self.policy_ref(action, target, risk)
         governed = action in self.config.governed_actions
+        provenance = provenance or []
 
         if classification is Classification.RESTRICTED and not mission_id:
             return GovernanceDecision(
@@ -409,9 +418,13 @@ class PolicyEngine:
                 decision=DecisionType.ALLOW,
                 policy_ref=ref,
                 reasons=[f"{action.value} is non-consequential and needs no approval"],
+                provenance=provenance,
+                tainted=tainted,
             )
-
         # Consequential: a human approval is mandatory, regardless of risk.
+        # Tainted provenance is disclosed on the approval request itself (see
+        # below) so the approver sees the poisoned upstream chain, and a tainted
+        # action may never reuse an approval issued without that disclosure.
         if approval_ref:
             request = await self.approvals.get(approval_ref)
             if request is None:
@@ -420,6 +433,33 @@ class PolicyEngine:
                     policy_ref=ref,
                     reasons=[f"approval {approval_ref!r} not found"],
                     approval_ref=approval_ref,
+                )
+            # A tainted action may only use an approval that disclosed the same
+            # taint. Otherwise an attacker could launder poisoned telemetry
+            # through an approval a human granted for a seemingly clean action.
+            if tainted and not request.tainted:
+                return GovernanceDecision(
+                    decision=DecisionType.DENY,
+                    policy_ref=ref,
+                    reasons=[
+                        f"approval {approval_ref} was issued without taint disclosure; "
+                        "request a fresh approval for the tainted chain"
+                    ],
+                    approval_ref=approval_ref,
+                    provenance=provenance,
+                    tainted=True,
+                )
+            if tainted and set(request.provenance) != set(provenance):
+                return GovernanceDecision(
+                    decision=DecisionType.DENY,
+                    policy_ref=ref,
+                    reasons=[
+                        f"approval {approval_ref} covers different provenance; "
+                        "request a fresh approval for this chain"
+                    ],
+                    approval_ref=approval_ref,
+                    provenance=provenance,
+                    tainted=True,
                 )
             if request.status is ApprovalStatus.DENIED:
                 return GovernanceDecision(
@@ -499,6 +539,8 @@ class PolicyEngine:
                 approval_ref=approval_ref,
                 authorization_ref=f"auth-{uuid.uuid4().hex[:12]}",
                 expires_at=expires,
+                provenance=provenance,
+                tainted=tainted,
             )
 
         # A redelivered task must not flood the human queue with duplicates.
@@ -510,6 +552,8 @@ class PolicyEngine:
                 and r.target == (target or "")
                 and r.correlation_id == correlation_id
                 and (r.mission_id or None) == (mission_id or None)
+                and r.tainted == tainted
+                and set(r.provenance) == set(provenance)
             ),
             None,
         )
@@ -530,16 +574,25 @@ class PolicyEngine:
                 requested_by=requested_by,
                 justification=justification,
                 correlation_id=correlation_id,
+                provenance=provenance,
+                tainted=tainted,
             )
         )
+        reasons = [
+            f"{action.value} on {target!r} requires human approval",
+            "an AI recommendation is not execution authority",
+        ]
+        if tainted:
+            reasons.append(
+                "upstream provenance is tainted: " + (", ".join(provenance) or "unknown")
+            )
         return GovernanceDecision(
             decision=DecisionType.HOLD,
             policy_ref=ref,
-            reasons=[
-                f"{action.value} on {target!r} requires human approval",
-                "an AI recommendation is not execution authority",
-            ],
+            reasons=reasons,
             approval_ref=request.id,
+            provenance=provenance,
+            tainted=tainted,
         )
 
     @staticmethod

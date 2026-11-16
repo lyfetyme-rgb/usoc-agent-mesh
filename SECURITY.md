@@ -127,6 +127,33 @@ There is no work submission over HTTP. When `AGENT_HEALTH_TOKEN` or
 `Authorization: Bearer <token>`; comparisons are constant-time. Responses
 contain counts and status flags only.
 
+### SHELL infrastructure boundary
+
+The seven SHELL roles are platform infrastructure, not domain agents. Because
+they sit beneath the bus, a SHELL compromise bypasses SERAPHIM and HITL. Treat
+every SHELL process as a privileged boundary:
+
+* Run SHELL components in separate, minimal containers with `read_only: true`,
+  `cap_drop: ALL`, `no-new-privileges`, and no shared PID namespace.
+* Pin base and dependency images by digest; rebuild immutably and sign images
+  (cosign/Sigstore) so a drifted SHELL image is rejected at admission.
+* Keep signing and evidence keys outside the agent runtime: use an HSM/KMS or
+  hardware-backed keystore, never a file readable by the mesh container.
+* Deny SHELL containers direct Redis or agent-bus credentials; give them a
+  dedicated, least-privilege control channel.
+* Audit and alert on any SHELL restart, image change, or exec into a SHELL
+  container.
+
+### Confused-deputy / provenance taint
+
+`TaskSpec` carries `provenance` (upstream subsystems) and `tainted` (any
+untrusted telemetry or vendor payload). A governed action derived from tainted
+provenance is not authorized by agent identity alone: SERAPHIM holds it for
+explicit human approval and records the provenance and taint flag in the
+evidence chain. This prevents poisoned ACIE telemetry -> AICEE recommendation ->
+COHESION plan from becoming an executable action without a human seeing the
+tainted chain.
+
 ### Capability scoping (least privilege)
 
 Each subsystem declares an authorization matrix in `subsystems.yaml`:

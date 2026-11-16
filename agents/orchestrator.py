@@ -307,6 +307,16 @@ class Orchestrator:
             for dep in step.depends_on
             if dep in results
         }
+        # Aggregate taint from every upstream step this one depends on. A plan
+        # built from advisory output (AICEE/COHESION) keeps the provenance of the
+        # telemetry that fed it, so SERAPHIM sees the real chain, not just the
+        # identity of the agent that forwarded it.
+        provenance = list(step.provenance)
+        tainted = step.tainted
+        for dep in step.depends_on:
+            if dep in results:
+                provenance.extend(results[dep].provenance)
+                tainted = tainted or results[dep].tainted
         inputs = {
             "goal": plan.goal,
             "step_id": step.id,
@@ -328,6 +338,8 @@ class Orchestrator:
             target=step.target,
             risk=step.risk,
             mission_id=self.mission_id,
+            provenance=list(dict.fromkeys(provenance)),
+            tainted=tainted,
         )
         started = time.perf_counter()
         log("step.start", step=step.id, agent=step.agent)

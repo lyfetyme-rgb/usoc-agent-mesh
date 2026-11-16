@@ -78,6 +78,12 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # SHELL runs beneath the bus, so cap blast radius even if it is compromised.
+    pids_limit: 256
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 4096
     healthcheck:
       test: ["CMD", "python", "-m", "agents", "probe", "--url", "http://127.0.0.1:8080/health"]
       interval: 30s

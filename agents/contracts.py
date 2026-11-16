@@ -83,6 +83,10 @@ class TaskSpec(Strict):
     justification: str | None = Field(default=None, max_length=2_000)
     mission_id: str | None = Field(default=None, max_length=100)
     tenant_id: str | None = Field(default=None, max_length=100)
+    # Provenance/taint tracking: which upstream subsystems contributed data and
+    # whether any of it came from an untrusted source (telemetry, vendor payloads).
+    provenance: list[str] = Field(default_factory=list, max_length=32)
+    tainted: bool = False
 
 
 class Artifact(Strict):
@@ -102,6 +106,9 @@ class TaskResult(Strict):
     policy_decision_ref: str | None = None
     authorization_ref: str | None = None
     evidence_ref: str | None = None
+    # Provenance flows with the result so downstream steps inherit taint.
+    provenance: list[str] = Field(default_factory=list)
+    tainted: bool = False
 
 
 class Query(Strict):
@@ -230,6 +237,8 @@ class Message(Strict):
         mission_id: str | None = None,
         tenant_id: str | None = None,
         classification: Classification = Classification.INTERNAL,
+        provenance: list[str] | None = None,
+        tainted: bool = False,
     ) -> "Message":
         return cls(
             correlation_id=correlation_id or _uuid(),
@@ -253,6 +262,8 @@ class Message(Strict):
                 justification=justification,
                 mission_id=mission_id,
                 tenant_id=tenant_id,
+                provenance=provenance or [],
+                tainted=tainted,
             ),
         )
 
@@ -318,6 +329,8 @@ class Step(BaseModel):
     action_class: ActionClass = ActionClass.READ_ONLY
     target: str | None = None
     risk: RiskLevel = RiskLevel.LOW
+    provenance: list[str] = Field(default_factory=list)
+    tainted: bool = False
 
 
 class Plan(BaseModel):

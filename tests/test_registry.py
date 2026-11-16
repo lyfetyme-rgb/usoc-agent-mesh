@@ -16,7 +16,7 @@ def test_nine_usoc_subsystems_load(registry):
         "bengal",
         "csssf",
         "oekp",
-        "cyber_strike",
+        "cyber_defense",
         "hitl",
     }
     assert registry.roles_total == 93
@@ -30,7 +30,7 @@ def test_routing_picks_the_owner(registry):
     assert registry.best("record the evidence and provenance for the decision").id == "oekp"
     assert registry.best("verify outcomes independently against evidence").id == "bengal"
     assert registry.best("simulate the change in a sandbox").id == "csssf"
-    assert registry.best("triage the security incident").id == "cyber_strike"
+    assert registry.best("triage the security incident").id == "cyber_defense"
     assert registry.best("route the approval to a human reviewer").id == "hitl"
     assert registry.best("interpret the mission intent and dependencies").id == "cohesion"
 

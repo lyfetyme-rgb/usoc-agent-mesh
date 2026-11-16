@@ -333,6 +333,14 @@ class BaseAgent:
             await self.bus.publish(msg.reply_with(result))
             return
 
+        # Carry provenance through the mesh: this result names its producer and
+        # inherits the caller's taint. Downstream steps cannot launder poisoned
+        # telemetry by re-delegating under a different agent identity.
+        merged = list(dict.fromkeys([*result.provenance, *spec.provenance, self.id]))
+        result = result.model_copy(
+            update={"provenance": merged, "tainted": result.tainted or spec.tainted}
+        )
+
         if decision is not None and decision.authorization_ref:
             evidence_ref = await self._audit(
                 "task.result",
@@ -344,6 +352,8 @@ class BaseAgent:
                     "output": result.output[:2_000],
                     "policy_ref": decision.policy_ref,
                     "authorization_ref": decision.authorization_ref,
+                    "provenance": decision.provenance,
+                    "tainted": decision.tainted,
                 },
             )
             result = result.model_copy(
@@ -422,6 +432,8 @@ class BaseAgent:
             requested_by=msg.sender,
             justification=spec.justification or spec.objective,
             correlation_id=msg.correlation_id,
+            provenance=spec.provenance,
+            tainted=spec.tainted,
         ),
         timeout=5.0,
     )
@@ -602,6 +614,8 @@ class BaseAgent:
         approval_ref: str | None = None,
         justification: str | None = None,
         mission_id: str | None = None,
+        provenance: list[str] | None = None,
+        tainted: bool = False,
     ) -> TaskResult:
         self._require_known(recipient)
         self._require_delegation_allowed(recipient, action_class, target)
@@ -619,6 +633,8 @@ class BaseAgent:
             approval_ref=approval_ref,
             justification=justification,
             mission_id=mission_id,
+            provenance=provenance,
+            tainted=tainted,
         )
         payload = await self._request(msg, timeout_s)
         if isinstance(payload, Failure):

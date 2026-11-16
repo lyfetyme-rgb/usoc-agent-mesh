@@ -151,6 +151,8 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
                 "requested_by": req.requested_by,
                 "decided_by": req.decided_by,
                 "note": req.note,
+                "provenance": req.provenance,
+                "tainted": req.tainted,
             },
         )
         return req

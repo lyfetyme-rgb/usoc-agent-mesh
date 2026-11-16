@@ -63,7 +63,7 @@ steps, the full message flow, and runtime metrics.
 | `bengal` | 9 | Independent assurance and validation against evidence. |
 | `csssf` | 10 | Controlled sandboxes, change rehearsal, fault injection, simulation results. |
 | `oekp` | 8 | Evidence, provenance, integrity hashes, audit trail, decision lineage. |
-| `cyber_strike` | 11 | Defensive security: vulnerability assessment, triage, detection, containment planning. |
+| `cyber_defense` | 11 | Defensive security: vulnerability assessment, triage, detection, containment planning. |
 | `hitl` | 10 | Human governance: decision presentation, approval routing, escalation, oversight. |
 
 **93 subsystem roles.** The seven SHELL roles are implemented as infrastructure,
@@ -99,7 +99,7 @@ observation -> intelligence -> mission interpretation -> security analysis
 This skeleton implements the backbone: observation (`acie`), intelligence
 (`aicee`), policy evaluation (`seraphim`), simulation (`csssf`), independent
 assurance (`bengal`), human authorization (`hitl`), evidence (`oekp`) and
-controlled improvement proposals (`aicee`). Security analysis (`cyber_strike`)
+controlled improvement proposals (`aicee`). Security analysis (`cyber_defense`)
 and mission interpretation (`cohesion`) are available and routable. The
 orchestrator intentionally does not auto-chain all twelve steps; it plans the
 steps needed for the goal, so a read-only analysis does not create a human
@@ -123,7 +123,7 @@ override its DENY.
 | approval has expired since it was decided | **DENY** |
 | approval does not cover this action, target and mission | **DENY** |
 | approval is approved and covers the action, target and mission | **ALLOW** + scoped authorization ref (TTL 900 s) |
-| CYBER STRIKE task matching prohibited offensive intent | **DENY** before the model runs |
+| CYBER DEFENSE task matching prohibited offensive intent | **DENY** before the model runs |
 
 Runtime behaviour is consistent: `HOLD` returns a typed `Handoff`, `DENY` returns
 a typed `Failure`, `ALLOW` attaches `policy_decision_ref`, `authorization_ref`
@@ -389,7 +389,7 @@ python -m agents probe --url http://127.0.0.1:8080/ready
 | tampered approval file | signed records; invalid signatures are dropped on load |
 | evidence tampering | hash chain + keyed MAC, independently verified |
 | secret leakage in logs | bearer, Basic, URL and query credential redaction |
-| offensive use of CYBER STRIKE | prohibited-intent screen before the model call |
+| offensive use of CYBER DEFENSE | prohibited-intent screen before the model call |
 | redirect loops A->B->A | `hop` counter, capped at 8, enforced by the contract |
 | stuck work | per-message deadline + timeout on every handler |
 | broker redelivery | `idempotency_key` + result cache, so side effects happen once |
@@ -480,7 +480,7 @@ The open design decision is how many roles should become separate runtime
 workers. The likely split is:
 
 * **Separate workers** where isolation or load demands it — OEKP writers, HITL
-  approval routing, CYBER STRIKE detection jobs.
+  approval routing, CYBER DEFENSE detection jobs.
 * **Capabilities inside the coordinator** where the work is a single reasoning
   pass — AICEE analysis, COHESION planning, BENGAL reporting.
 

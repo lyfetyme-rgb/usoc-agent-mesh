@@ -20,7 +20,7 @@ roles as declared capabilities. See [§11](#11-roles-vs-runtime-workers).
           publish typed envelope             |        receive inbox.<id>
    +----------+----------+----------+--------+--------+----------+----------+
    |          |          |          |        |        |          |          |
- AICEE      ACIE     SERAPHIM    COHESION  BENGAL   CSSSF      OEKP   CYBER STRIKE
+ AICEE      ACIE     SERAPHIM    COHESION  BENGAL   CSSSF      OEKP   CYBER DEFENSE
                                                                        HITL
    +----------+----------+----------+--------+--------+----------+----------+
                      peer-to-peer delegate() / ask()
@@ -61,7 +61,7 @@ agents; the planner selects the subset a goal needs.
 | 1 Observation | ACIE | implemented as coordinator |
 | 2 Intelligence | AICEE | implemented as coordinator |
 | 3 Mission interpretation | COHESION | implemented as coordinator |
-| 4 Security analysis | CYBER STRIKE | implemented, defensive-only screen |
+| 4 Security analysis | CYBER DEFENSE | implemented, defensive-only screen |
 | 5 Risk and policy evaluation | SERAPHIM + PolicyEngine | deterministic, implemented |
 | 6 Simulation | CSSSF | implemented as coordinator |
 | 7 Independent assurance | BENGAL | deterministic evidence verification |
@@ -130,7 +130,7 @@ TaskSpec
    | action_class in {execute, contain}?
    +-- no --> ordinary work, no gate
    |
-   +-- yes --> CYBER STRIKE intent screen
+   +-- yes --> CYBER DEFENSE intent screen
                  | prohibited -> DENY
                  v
               PolicyEngine.evaluate
@@ -159,7 +159,7 @@ exception for urgency. An LLM cannot turn a DENY into an ALLOW.
 | approval has expired since it was decided | **DENY** |
 | approval does not cover this action, target and mission | **DENY** |
 | approval approved and covering | **ALLOW** + authorization ref (TTL 900 s) |
-| CYBER STRIKE prohibited intent | **DENY** before the model runs |
+| CYBER DEFENSE prohibited intent | **DENY** before the model runs |
 
 Default allowlist: `sandbox/*,staging/*`. An approval for `sandbox/node-1`
 cannot be replayed against `sandbox/node-2` or `prod/db-primary`; a wildcard
@@ -317,7 +317,7 @@ vocabulary; `keywords` are what distinguish similar subsystems:
 | BENGAL | assurance, independent, verify, resilience, acceptance criteria |
 | CSSSF | sandbox, simulate, fault injection, rehearsal, isolation |
 | OEKP | evidence, provenance, audit trail, hash, lineage, retention |
-| CYBER STRIKE | security incident, triage, vulnerability, threat, detection |
+| CYBER DEFENSE | security incident, triage, vulnerability, threat, detection |
 | HITL | approval, approver, human, reviewer, escalate, oversight |
 
 Routing is explainable on purpose: `registry.route(text)` returns scored
@@ -387,7 +387,7 @@ Current split:
 * **9 runtime coordinators** — one per subsystem, declared in
   `subsystems.yaml`, each carrying all roles for its domain.
 * **Deterministic components** — policy engine, approval store, evidence chain,
-  CYBER STRIKE intent screen. These are not LLM calls.
+  CYBER DEFENSE intent screen. These are not LLM calls.
 * **Platform SHELL** — registry, bus, orchestrator, contracts, health and
   diagnostics.
 
@@ -397,7 +397,7 @@ Candidate next split:
 |---|---|---|
 | OEKP writers | separate worker | append contention and audit isolation |
 | HITL routing | separate service | must stay independent of the requester |
-| CYBER STRIKE detection jobs | background workers | scheduled, high volume, narrow scope |
+| CYBER DEFENSE detection jobs | background workers | scheduled, high volume, narrow scope |
 | AICEE analysis / COHESION planning | capabilities in coordinator | single reasoning pass |
 | BENGAL reporting | capability in coordinator | reads evidence, no side effects |
 
@@ -459,7 +459,7 @@ The suite covers the invariants that break multi-agent systems:
 * policy matrix: ALLOW, HOLD, DENY, target allowlist, restricted data
 * approval lifecycle: approve, deny, target mismatch, persistence
 * HITL never self-approves; runtime returns `Handoff`, not execution
-* CYBER STRIKE prohibited-intent denial before the model
+* CYBER DEFENSE prohibited-intent denial before the model
 * evidence append, verification and tamper detection
 * connector mapping, redaction, path confinement, HTTPS/host allowlist, token
   requirements and per-source fault isolation
@@ -500,7 +500,7 @@ Phased plan:
 4. **Production hardening** — authenticated bus identities, durable approvals,
    immutable evidence and read-only health are implemented; remaining work is
    per-agent keys, OPA/Rego and signed authorization artifacts.
-5. **Role decomposition** — split OEKP/HITL/CYBER STRIKE workers where isolation
+5. **Role decomposition** — split OEKP/HITL/CYBER DEFENSE workers where isolation
    or load requires it; keep the rest as coordinator capabilities.
 6. **Full operational validation** — BENGAL acceptance suite, fault injection,
    tenant isolation, performance and security evidence.

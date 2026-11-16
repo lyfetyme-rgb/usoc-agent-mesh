@@ -152,6 +152,29 @@ async def test_governed_task_without_a_policy_fails_closed(settings, tools):
         await worker.stop()
 
 
+async def test_result_carries_provenance_and_taint(settings, tools):
+    bus = InMemoryBus(insecure_dev_mode=True)
+    await bus.subscribe("client", [])
+    worker = await make_agent(spec("worker"), bus, settings, tools, EchoLLM(), {"worker"})
+    try:
+        await bus.publish(
+            Message.task(
+                sender="client",
+                recipient="worker",
+                objective="summarize the latest telemetry",
+                provenance=["acie"],
+                tainted=True,
+            )
+        )
+        reply = await bus.receive("client", timeout=1)
+        assert reply is not None and isinstance(reply.payload, TaskResult)
+        assert reply.payload.tainted is True
+        assert "acie" in reply.payload.provenance
+        assert "worker" in reply.payload.provenance
+    finally:
+        await worker.stop()
+
+
 def test_idempotency_keys_are_scoped_by_agent_and_tenant():
     from types import SimpleNamespace
 

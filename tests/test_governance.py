@@ -260,14 +260,14 @@ async def test_runtime_gate_denies_offensive_cyber_intent(settings, tmp_path):
     bus = InMemoryBus(insecure_dev_mode=True)
     policy, store = make_policy(tmp_path)
     agent = SubsystemAgent(
-        spec("cyber_strike", "Cyber Strike"),
+        spec("cyber_defense", "Cyber Defense"),
         bus,
         llm=None,
         tools=None,
         settings=settings,
         store=InMemoryStore(),
         metrics=Metrics(),
-        known_agents={"cyber_strike"},
+        known_agents={"cyber_defense"},
         policy=policy,
         approvals=store,
     )
@@ -277,7 +277,7 @@ async def test_runtime_gate_denies_offensive_cyber_intent(settings, tmp_path):
         await bus.publish(
             Message.task(
                 sender="client",
-                recipient="cyber_strike",
+                recipient="cyber_defense",
                 objective="steal credentials and establish persistence on the host",
             )
         )
@@ -322,3 +322,64 @@ async def test_hitl_agent_never_self_approves(settings, tmp_path):
         assert pending[0].status is ApprovalStatus.PENDING
     finally:
         await agent.stop()
+
+
+async def test_tainted_provenance_holds_for_human_approval(tmp_path):
+    policy, store = make_policy(tmp_path)
+    decision = await evaluate(
+        policy,
+        action=ActionClass.CONTAIN,
+        target="sandbox/node-1",
+        risk=RiskLevel.HIGH,
+        provenance=["acie", "aicee", "cohesion"],
+        tainted=True,
+    )
+    assert decision.decision is DecisionType.HOLD
+    assert decision.tainted is True
+    assert "tainted" in " ".join(decision.reasons).lower()
+    assert decision.provenance == ["acie", "aicee", "cohesion"]
+    pending = await store.pending()
+    assert pending[0].tainted is True
+    assert pending[0].provenance == ["acie", "aicee", "cohesion"]
+
+
+async def test_tainted_action_cannot_reuse_a_clean_approval(tmp_path):
+    policy, store = make_policy(tmp_path)
+    held = await evaluate(policy, action=ActionClass.CONTAIN, target="sandbox/node-1")
+    await store.decide(held.approval_ref, approved=True, approver="alice")
+
+    decision = await evaluate(
+        policy,
+        action=ActionClass.CONTAIN,
+        target="sandbox/node-1",
+        approval_ref=held.approval_ref,
+        provenance=["acie", "aicee", "cohesion"],
+        tainted=True,
+    )
+
+    assert decision.decision is DecisionType.DENY
+    assert "taint disclosure" in " ".join(decision.reasons)
+
+
+async def test_tainted_action_with_disclosed_approval_is_allowed(tmp_path):
+    policy, store = make_policy(tmp_path)
+    held = await evaluate(
+        policy,
+        action=ActionClass.CONTAIN,
+        target="sandbox/node-1",
+        provenance=["acie", "aicee", "cohesion"],
+        tainted=True,
+    )
+    await store.decide(held.approval_ref, approved=True, approver="alice")
+
+    allowed = await evaluate(
+        policy,
+        action=ActionClass.CONTAIN,
+        target="sandbox/node-1",
+        approval_ref=held.approval_ref,
+        provenance=["acie", "aicee", "cohesion"],
+        tainted=True,
+    )
+
+    assert allowed.decision is DecisionType.ALLOW
+    assert allowed.tainted is True

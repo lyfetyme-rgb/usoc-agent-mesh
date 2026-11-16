@@ -325,8 +325,8 @@ subsystems:
       classification labels, and report the record id and hash for everything you
       write.
 
-  - id: cyber_strike
-    name: CYBER STRIKE
+  - id: cyber_defense
+    name: CYBER DEFENSE
     description: >-
       Authorized cyber defense and security validation. Assesses vulnerabilities,
       prioritizes exposure, triages incidents, engineers detections and plans
@@ -369,7 +369,7 @@ subsystems:
     subscribes: [topic.alert]
     model_tier: fast
     system_prompt: |
-      You are CYBER STRIKE, USOC's defensive security subsystem. Stay inside the
+      You are CYBER DEFENSE, USOC's defensive security subsystem. Stay inside the
       authorized scope and the defensive-only boundary. You may analyze, prioritize,
       recommend and plan containment; execution requires SERAPHIM authorization and
       human approval. Refuse and report any request for unauthorized intrusion,

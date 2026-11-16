@@ -49,6 +49,10 @@ class ProposedAction(BaseModel):
     classification: Classification = Classification.INTERNAL
     justification: str
     mission_id: str | None = None
+    # Connector telemetry is untrusted input. Record where the recommendation
+    # came from and require the approval to disclose that taint.
+    provenance: list[str] = Field(default_factory=list)
+    tainted: bool = False
 
 
 class FragmentationReport(BaseModel):
@@ -156,6 +160,8 @@ class FragmentationService:
                 f"{incident.summary}. {', '.join(incident.reasons[:3])}."
             )[:2_000],
             mission_id=mission_id,
+            provenance=list(incident.sources),
+            tainted=True,
         )
 
     async def authorize(
@@ -182,6 +188,8 @@ class FragmentationService:
                 requested_by=self.requested_by,
                 justification=action.justification,
                 correlation_id=action.incident_id,
+                provenance=action.provenance,
+                tainted=action.tainted,
             )
         await self._audit(
             "fragmentation.policy_decision",
@@ -195,6 +203,8 @@ class FragmentationService:
                 "approval_ref": decision.approval_ref,
                 "authorization_ref": decision.authorization_ref,
                 "reasons": decision.reasons,
+                "provenance": decision.provenance,
+                "tainted": decision.tainted,
             },
             mission_id=mission_id or action.mission_id,
             classification=action.classification.value,

@@ -8,7 +8,7 @@ different on purpose: their core duty must not be probabilistic.
 * BENGAL    -> independent verification (recomputes the chain)
 * HITL      -> human approval queue (creates Handoff, never self-approves)
 
-CYBER STRIKE keeps the LLM path but its runtime gate hard-denies prohibited
+CYBER DEFENSE keeps the LLM path but its runtime gate hard-denies prohibited
 offensive intent before any model call.
 """
 
@@ -88,6 +88,8 @@ class SeraphimAgent(SubsystemAgent):
             requested_by=msg.sender,
             justification=data.get("justification") or spec.justification or spec.objective,
             correlation_id=msg.correlation_id,
+            provenance=list(data.get("provenance") or spec.provenance),
+            tainted=bool(data.get("tainted", spec.tainted)),
         )
         self.metrics.inc("policy.evaluated")
         log("seraphim.decision", decision=decision.decision.value, target=data.get("target", spec.target))
@@ -133,6 +135,8 @@ class HitlAgent(SubsystemAgent):
                 requested_by=msg.sender,
                 justification=str(spec.inputs.get("justification") or spec.justification or spec.objective),
                 correlation_id=msg.correlation_id,
+                provenance=list(spec.inputs.get("provenance") or spec.provenance),
+                tainted=bool(spec.inputs.get("tainted", spec.tainted)),
             )
         )
         self.metrics.inc("hitl.requested")
