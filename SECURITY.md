@@ -625,6 +625,12 @@ The FinOps & Banking profile adds two hard controls:
   nonce, TTL and scope) before ALLOW, so a partially-approved or stale quorum
   cannot slip through. The existing single-approver fallback remains the default
   for other profiles.
+* A partial quorum is not a consumable verdict. `ApprovalStore.consume()` refuses
+  any record that is not `APPROVED` with the required number of distinct signed
+  decisions, so the first human's signature cannot spend the single-use nonce.
+  The runtime also publishes a `Handoff` for a HOLD and never writes that HOLD to
+  the idempotency cache, so a redelivery re-evaluates the current quorum instead
+  of replaying a stale terminal answer.
 
 ### PII/PHI classification on every connector
 
@@ -647,15 +653,26 @@ possible.
 Connectors are read-only, but publishing a decision to the Atlassian bridge (or
 another external sink) moves governed data outside the mesh. With
 `AGENT_BLOCK_TAINTED_EGRESS=true`, `EgressGuard.assert_allowed()` blocks any
-tainted or `RESTRICTED` publication unless a sign-off satisfies all of:
+tainted or `RESTRICTED` publication unless a sign-off satisfies **all** of:
 
 * the approval record's status is `APPROVED` (not `PENDING`/`DENIED`);
-* its `target` (or one of `also_targets`) covers the exact egress target; and
+* its `egress_target` equals the exact destination endpoint (for example
+  `atlassian:https://example.atlassian.net`);
+* its `egress_payload_digest` equals the digest of the exact decision payload
+  being published; and
 * it carries a verification with `verified=True` whose method is `detached`
   (Ed25519) or `oidc`.
 
-A bare approver name, an unverified credential, a mismatched target or a pending
-record never clears the gate. Use
+Both binding fields are set when the policy engine creates the approval and are
+covered by the signed approval record and by `approval_credential_payload()`, the
+bytes the human signs. `decision_payload_digest()` includes only immutable
+request-time fields (scope, target, mission, provenance, taint disclosure, amount
+and currency), so the digest is stable between request and publication. A
+governed-action target such as `sandbox/<noun>` in `also_targets` does **not**
+satisfy the egress binding: an approval for one internal action cannot be reused
+to publish to a different external sink. A bare approver name, an unverified
+credential, a mismatched destination, a different payload or a pending record
+never clears the gate. Use
 `python -m agents publish-decision <id> --signoff <approved-id>`. The guard is
 wired into decision publication/bridge publication; other network paths are
 outside its scope, so keep the mesh network-segmented.

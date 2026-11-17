@@ -38,7 +38,7 @@ from .bus import ConfigurationError as BusConfigurationError
 from .bus import topic_rules_from_authority
 from .config import Settings, get_settings, subsystems_integrity, verify_subsystems_file
 from .evidence import EvidenceChain
-from .governance import ApprovalCredential, FileApprovalStore
+from .governance import ApprovalCredential, FileApprovalStore, decision_payload_digest
 from .profiles import (
     PROFILES,
     apply_role_profile,
@@ -376,6 +376,7 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
                 tainted=req.tainted,
                 classification="restricted" if req.tainted else "internal",
                 signoffs=[req],
+                payload_digest=decision_payload_digest(req),
                 also_targets=[req.target],
             )
             bridge = build_bridge(settings, signer)
@@ -497,6 +498,7 @@ def cmd_publish_decision(args: argparse.Namespace) -> int:
             tainted=req.tainted,
             classification="restricted" if req.tainted else "internal",
             signoffs=signoffs,
+            payload_digest=decision_payload_digest(req),
             also_targets=[req.target],
         )
         chain = EvidenceChain(

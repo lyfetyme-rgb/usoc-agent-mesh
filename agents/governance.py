@@ -28,7 +28,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .contracts import ActionClass, Classification, RiskLevel
-from .security import Signer, exclusive_lock, secure_dir, secure_file
+from .security import Signer, canonical, exclusive_lock, secure_dir, secure_file
 
 GOVERNED = frozenset({ActionClass.EXECUTE, ActionClass.CONTAIN})
 TIER_RANK = {
@@ -238,6 +238,14 @@ class ApprovalRequest(BaseModel):
     # different wire, and limit checks are re-run at execution time.
     amount: str | None = Field(default=None, max_length=40, pattern=r"^\d+(\.\d{1,4})?$")
     currency: str | None = Field(default=None, max_length=12, pattern=r"^[A-Z]{3}$")
+    # External-egress binding. A verified sign-off authorizes publication of
+    # exactly this decision payload to exactly this destination. Both fields are
+    # covered by the record signature and the human credential, so a sign-off
+    # for one sink or one payload cannot be replayed for another.
+    egress_target: str | None = Field(default=None, max_length=500)
+    egress_payload_digest: str | None = Field(
+        default=None, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
     # HMAC or Ed25519 over the canonical record. Unsigned/tampered never grants.
     signature: str | None = Field(default=None, max_length=128)
 
@@ -245,6 +253,32 @@ class ApprovalRequest(BaseModel):
         # Bind to the exact target. A wildcard approval would let one human
         # sign-off authorize every host the pattern matches, so it is refused.
         return self.action_class is action and target == self.target
+
+
+def decision_payload_digest(req: ApprovalRequest) -> str:
+    """Stable digest of the irreversible decision scope approved for egress.
+
+    Only request-time fields are included: decisions, verification, status and
+    consumption metadata change as humans sign and the approval executes. The
+    digest is computed when the request is created and recomputed from the same
+    fields at publication, so it cannot drift between the two.
+    """
+    scope = {
+        "id": req.id,
+        "action_class": req.action_class.value,
+        "target": req.target,
+        "risk": req.risk.value,
+        "mission_id": req.mission_id,
+        "requested_by": req.requested_by,
+        "justification": req.justification,
+        "provenance": list(req.provenance),
+        "tainted": bool(req.tainted),
+        "taint_hash": req.taint_hash,
+        "quorum": req.quorum,
+        "amount": req.amount,
+        "currency": req.currency,
+    }
+    return hashlib.sha256(canonical(scope)).hexdigest()
 
 
 class ApprovalStore(Protocol):
@@ -441,6 +475,17 @@ class InMemoryApprovalStore:
             req = self._items.get(approval_id)
             if req is None:
                 return None
+            # A partial quorum is still PENDING: the first human's signature
+            # must never spend the nonce and must never become a cached terminal
+            # verdict. Only a fully decided approval can be consumed.
+            if req.status is not ApprovalStatus.APPROVED:
+                return None
+            if req.quorum > 1 and (
+                len(req.decisions) < req.quorum
+                or len({d.approver for d in req.decisions}) != len(req.decisions)
+                or any(not d.approved for d in req.decisions)
+            ):
+                return None
             expected = req.nonce or req.id
             if nonce != expected or req.consumed_at is not None:
                 return None
@@ -606,6 +651,9 @@ class PolicyConfig(BaseModel):
     max_transaction_amount: Decimal | None = None
     transaction_currency: str = "USD"
     approval_quorum: int = Field(default=1, ge=1, le=9)
+    # Destination whose restricted decisions this engine authorizes for signed
+    # external publication. Bound into every approval it creates.
+    egress_target: str | None = None
 
     @field_validator("max_transaction_amount")
     @classmethod
@@ -1079,23 +1127,26 @@ class PolicyEngine:
                 approval_ref=duplicate.id,
             )
 
-        request = await self.approvals.request(
-            ApprovalRequest(
-                action_class=action,
-                target=target or "",
-                risk=risk,
-                mission_id=mission_id,
-                requested_by=requested_by,
-                justification=justification,
-                correlation_id=correlation_id,
-                provenance=provenance,
-                tainted=tainted,
-                taint_hash=taint_disclosure_hash(provenance, tainted),
-                quorum=self.config.approval_quorum,
-                amount=canonical_amount,
-                currency=want_currency,
-            )
+        request = ApprovalRequest(
+            action_class=action,
+            target=target or "",
+            risk=risk,
+            mission_id=mission_id,
+            requested_by=requested_by,
+            justification=justification,
+            correlation_id=correlation_id,
+            provenance=provenance,
+            tainted=tainted,
+            taint_hash=taint_disclosure_hash(provenance, tainted),
+            quorum=self.config.approval_quorum,
+            amount=canonical_amount,
+            currency=want_currency,
+            egress_target=self.config.egress_target,
         )
+        request = request.model_copy(
+            update={"egress_payload_digest": decision_payload_digest(request)}
+        )
+        request = await self.approvals.request(request)
         reasons = [
             f"{action.value} on {target!r} requires human approval",
             "an AI recommendation is not execution authority",

@@ -26,6 +26,7 @@ from agents.governance import (
     InMemoryApprovalStore,
     PolicyConfig,
     PolicyEngine,
+    decision_payload_digest,
     parse_money,
 )
 from agents.profiles import (
@@ -222,6 +223,9 @@ async def test_partial_quorum_stays_pending_then_clears():
         policy, approval_ref=held.approval_ref, amount="4820.00", currency="USD"
     )
     assert still_held.decision is DecisionType.HOLD
+    # A partial quorum produces HOLD, not a consumed nonce or a cached ALLOW.
+    pending = await store.get(held.approval_ref)
+    assert pending is not None and pending.consumed_at is None
 
     second = await store.decide(held.approval_ref, approved=True, approver="bob")
     assert second.status is ApprovalStatus.APPROVED
@@ -240,6 +244,49 @@ async def test_quorum_requires_distinct_humans():
     await store.decide(held.approval_ref, approved=True, approver="alice")
     with pytest.raises(ValueError, match="distinct humans"):
         await store.decide(held.approval_ref, approved=True, approver="alice")
+
+
+async def test_pending_quorum_never_consumes_the_nonce():
+    policy, store = make_finops_policy()
+    held = await finops_evaluate(policy, amount="4820.00", currency="USD")
+    req = await store.get(held.approval_ref)
+    assert req is not None
+
+    # Neither an untouched nor a partially signed approval is consumable.
+    assert await store.consume(held.approval_ref, nonce=req.nonce) is None
+    partial = await store.decide(held.approval_ref, approved=True, approver="alice")
+    assert partial.status is ApprovalStatus.PENDING
+    assert await store.consume(held.approval_ref, nonce=req.nonce) is None
+    untouched = await store.get(held.approval_ref)
+    assert untouched is not None and untouched.consumed_at is None
+
+    final = await store.decide(held.approval_ref, approved=True, approver="bob")
+    assert final.status is ApprovalStatus.APPROVED
+    spent = await store.consume(held.approval_ref, nonce=req.nonce)
+    assert spent is not None and spent.consumed_at is not None
+    # Single use survives a completed quorum: a replay is still refused.
+    assert await store.consume(held.approval_ref, nonce=req.nonce) is None
+
+
+async def test_policy_binds_egress_target_and_payload_digest():
+    store = InMemoryApprovalStore()
+    policy = PolicyEngine(
+        PolicyConfig(egress_target="atlassian:https://example.atlassian.net"), store
+    )
+    held = await policy.evaluate(
+        action=ActionClass.EXECUTE,
+        target="sandbox/node-1",
+        risk=RiskLevel.HIGH,
+        mission_id="m1",
+        classification=Classification.RESTRICTED,
+        approval_ref=None,
+        requested_by="planner",
+        tainted=True,
+    )
+    req = await store.get(held.approval_ref)
+    assert req is not None
+    assert req.egress_target == "atlassian:https://example.atlassian.net"
+    assert req.egress_payload_digest == decision_payload_digest(req)
 
 
 async def test_single_approver_quorum_still_works():
@@ -338,14 +385,26 @@ def test_correlation_propagates_taint_and_labels():
 
 # -- egress guard ------------------------------------------------------------
 
-def approved_signoff(target: str, *, verified: bool = True, method: str = "detached") -> ApprovalRequest:
+EGRESS_TARGET = "atlassian:https://example.atlassian.net"
+PAYLOAD_DIGEST = "a" * 64
+
+
+def approved_signoff(
+    *,
+    target: str = EGRESS_TARGET,
+    digest: str | None = PAYLOAD_DIGEST,
+    verified: bool = True,
+    method: str = "detached",
+) -> ApprovalRequest:
     return ApprovalRequest(
         action_class=ActionClass.EXECUTE,
-        target=target,
+        target="sandbox/target",
         risk=RiskLevel.HIGH,
         requested_by="planner",
         status=ApprovalStatus.APPROVED,
         decided_by="alice",
+        egress_target=target,
+        egress_payload_digest=digest,
         verification=ApprovalVerification(
             verified=verified, method=method, approver_id="alice"  # type: ignore[arg-type]
         ),
@@ -355,51 +414,85 @@ def approved_signoff(target: str, *, verified: bool = True, method: str = "detac
 def test_egress_blocks_tainted_data_without_signed_signoff():
     guard = EgressGuard(block_tainted=True)
     with pytest.raises(EgressError, match="verified signed sign-off"):
-        guard.assert_allowed(target="atlassian:adr", tainted=True)
+        guard.assert_allowed(target=EGRESS_TARGET, tainted=True)
     with pytest.raises(EgressError):
-        guard.assert_allowed(target="atlassian:adr", classification=Classification.RESTRICTED)
+        guard.assert_allowed(
+            target=EGRESS_TARGET, classification=Classification.RESTRICTED
+        )
 
 
-def test_egress_allows_matching_verified_signoff():
+def test_egress_allows_only_digest_bound_target_matching_signoff():
     guard = EgressGuard(block_tainted=True)
-    # A sign-off naming the governed action covers publication of its decision.
     guard.assert_allowed(
-        target="atlassian:adr",
+        target=EGRESS_TARGET,
         tainted=True,
-        signoffs=[approved_signoff("sandbox/target")],
-        also_targets=["sandbox/target"],
-    )
-    guard.assert_allowed(
-        target="atlassian:adr",
-        tainted=True,
-        signoffs=[approved_signoff("atlassian:adr")],
+        signoffs=[approved_signoff()],
+        payload_digest=PAYLOAD_DIGEST,
     )
 
 
 def test_egress_rejects_unverified_wrong_target_or_pending():
     guard = EgressGuard(block_tainted=True)
     with pytest.raises(EgressError):
-        guard.assert_allowed(target="atlassian:adr", tainted=True, signoffs=[approved_signoff("elsewhere")])
-    with pytest.raises(EgressError):
         guard.assert_allowed(
-            target="atlassian:adr",
+            target=EGRESS_TARGET,
             tainted=True,
-            signoffs=[approved_signoff("atlassian:adr", verified=False)],
+            signoffs=[approved_signoff(target="atlassian:https://other.example")],
+            payload_digest=PAYLOAD_DIGEST,
         )
     with pytest.raises(EgressError):
         guard.assert_allowed(
-            target="atlassian:adr",
+            target=EGRESS_TARGET,
             tainted=True,
-            signoffs=[approved_signoff("atlassian:adr", method="none")],
+            signoffs=[approved_signoff(verified=False)],
+            payload_digest=PAYLOAD_DIGEST,
         )
-    pending = approved_signoff("atlassian:adr")
+    with pytest.raises(EgressError):
+        guard.assert_allowed(
+            target=EGRESS_TARGET,
+            tainted=True,
+            signoffs=[approved_signoff(method="none")],
+            payload_digest=PAYLOAD_DIGEST,
+        )
+    pending = approved_signoff()
     pending.status = ApprovalStatus.PENDING
     with pytest.raises(EgressError):
-        guard.assert_allowed(target="atlassian:adr", tainted=True, signoffs=[pending])
+        guard.assert_allowed(
+            target=EGRESS_TARGET, tainted=True, signoffs=[pending], payload_digest=PAYLOAD_DIGEST
+        )
+
+
+def test_egress_rejects_a_governed_action_target_as_a_sink_binding():
+    """An approval for sandbox/target may not authorize any external sink."""
+    guard = EgressGuard(block_tainted=True)
+    with pytest.raises(EgressError):
+        guard.assert_allowed(
+            target=EGRESS_TARGET,
+            tainted=True,
+            signoffs=[approved_signoff(target="sandbox/target")],
+            payload_digest=PAYLOAD_DIGEST,
+            also_targets=["sandbox/target"],
+        )
+
+
+def test_egress_rejects_digest_mismatch_or_missing_binding():
+    guard = EgressGuard(block_tainted=True)
+    for signoff, digest in (
+        (approved_signoff(), "b" * 64),
+        (approved_signoff(digest=None), PAYLOAD_DIGEST),
+        (approved_signoff(), None),
+    ):
+        with pytest.raises(EgressError):
+            guard.assert_allowed(
+                target=EGRESS_TARGET,
+                tainted=True,
+                signoffs=[signoff],
+                payload_digest=digest,
+            )
 
 
 def test_egress_disabled_allows_anything():
-    EgressGuard(block_tainted=False).assert_allowed(target="atlassian:adr", tainted=True)
+    EgressGuard(block_tainted=False).assert_allowed(target=EGRESS_TARGET, tainted=True)
 
 
 # -- compliance exports ------------------------------------------------------

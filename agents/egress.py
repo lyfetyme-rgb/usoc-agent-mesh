@@ -39,9 +39,19 @@ class EgressGuard:
         tainted: bool = False,
         classification: Classification | str = Classification.INTERNAL,
         signoffs: Iterable[Any] = (),
+        payload_digest: str | None = None,
         also_targets: Iterable[str] = (),
     ) -> None:
-        """Fail closed unless a verified signed sign-off covers this egress."""
+        """Fail closed unless a verified sign-off binds to this exact egress.
+
+        A restricted sign-off must commit to both the destination endpoint
+        (``egress_target``) and the exact decision payload (``egress_payload_digest``)
+        at request time; both are covered by the approval record signature and
+        by the human's detached/OIDC credential. ``also_targets`` is retained for
+        callers that also name the governed action, but it never satisfies a
+        restricted egress — otherwise an approval for one governed action could
+        be replayed against a different external sink.
+        """
         if not self.block_tainted or not self.is_restricted(
             tainted=tainted, classification=classification
         ):
@@ -51,10 +61,13 @@ class EgressGuard:
                 continue
             if req.status is not ApprovalStatus.APPROVED:
                 continue
-            # The sign-off must name the exact egress destination (or the
-            # governed action whose decision is being published). A generic
-            # approval for unrelated work cannot authorize publication.
-            if req.target not in {target, *also_targets}:
+            if not req.egress_target or req.egress_target != target:
+                continue
+            if (
+                not req.egress_payload_digest
+                or not payload_digest
+                or req.egress_payload_digest != payload_digest
+            ):
                 continue
             verified = [
                 v
@@ -65,6 +78,7 @@ class EgressGuard:
                 return
         raise EgressError(
             "external egress of tainted/restricted data requires a verified signed "
-            f"sign-off for target {target!r} (use --signoff with an approved "
-            "approval carrying a detached signature or id_token)"
+            f"sign-off bound to target {target!r} and the exact payload digest "
+            "(use --signoff with an approved approval carrying a detached "
+            "signature or id_token and matching egress binding)"
         )

@@ -5,7 +5,8 @@ import asyncio
 import pytest
 
 from agents.bus import InMemoryBus
-from agents.contracts import ActionClass, Message, TaskResult, TaskSpec
+from agents.contracts import ActionClass, Handoff, Message, TaskResult, TaskSpec
+from agents.governance import DecisionType, GovernanceDecision
 from agents.llm import EchoLLM
 from agents.observability import Metrics
 from agents.registry import SubsystemSpec
@@ -127,6 +128,66 @@ async def test_tool_calls_are_limited_to_the_card(settings, tools):
     try:
         result = await worker._run_tool({"tool_name": "workspace.write", "arguments": {"path": "x", "content": "y"}})
         assert "not permitted" in result["error"]
+    finally:
+        await worker.stop()
+
+
+async def test_hold_is_not_cached_as_a_terminal_verdict(settings, tools):
+    """A HOLD/Handoff must never seed the idempotency result cache."""
+
+    class HoldingPolicy:
+        def screen_text(self, text):
+            return []
+
+        def policy_ref(self, action, target, risk):
+            return "pol-partial"
+
+        async def evaluate(self, **kwargs):
+            return GovernanceDecision(
+                decision=DecisionType.HOLD,
+                policy_ref="pol-partial",
+                approval_ref="apr-partial",
+            )
+
+    class CountingStore(InMemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.writes = 0
+
+        async def set(self, key, value, ttl_s=None):
+            self.writes += 1
+            await super().set(key, value, ttl_s)
+
+    bus = InMemoryBus(insecure_dev_mode=True)
+    await bus.subscribe("client", [])
+    store = CountingStore()
+    worker = SubsystemAgent(
+        spec("worker"),
+        bus,
+        llm=EchoLLM(),
+        tools=tools,
+        settings=settings,
+        store=store,
+        metrics=Metrics(),
+        known_agents={"worker"},
+        policy=HoldingPolicy(),
+    )
+    await worker.start()
+    try:
+        msg = Message.task(
+            sender="client",
+            recipient="worker",
+            objective="freeze merchant account",
+            action_class=ActionClass.EXECUTE,
+            target="sandbox/merchant-account-884",
+            idempotency_key="wire-1",
+        )
+        await bus.publish(msg)
+        await bus.publish(msg.model_copy(deep=True))
+        replies = [await bus.receive("client", timeout=1) for _ in range(2)]
+        assert all(r is not None and isinstance(r.payload, Handoff) for r in replies)
+        assert all(r.payload.approval_ref == "apr-partial" for r in replies)
+        assert store.writes == 0
     finally:
         await worker.stop()
 

@@ -408,6 +408,11 @@ def approval_credential_payload(
             "requested_by": req.requested_by,
             "decided_by": str(approver).strip(),
             "approved": bool(approved),
+            # The human signs the exact external egress authorization too, so
+            # neither the destination nor the decision digest can be swapped
+            # after the credential is issued.
+            "egress_target": req.egress_target,
+            "egress_payload_digest": req.egress_payload_digest,
         }
     )
 

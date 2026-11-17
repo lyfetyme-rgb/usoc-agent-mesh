@@ -43,7 +43,7 @@ python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --vertical finance      # transaction gate + dual HITL
 python -m agents demo-fragmentation --vertical healthcare   # PII/PHI taint + signed egress
-python -m pytest -q              # 274 passed, 1 env-gated skip, no network
+python -m pytest -q              # 279 passed, 1 env-gated skip, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
@@ -70,7 +70,7 @@ the bridge is opt-in and its tests use an injected HTTP transport.
 
 | Time | Show | Point |
 |---|---|---|
-| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 274 passing with 1 symlink skip. |
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 279 passing with 1 symlink skip. |
 | 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
 | 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
 | 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |
@@ -210,7 +210,8 @@ pack without editing code.
 - **Dual-approver HITL** — `AGENT_APPROVAL_QUORUM=2` requires two **distinct
   verified humans**. A first decision leaves the record `PENDING`; a duplicate
   approver is rejected; the execution gate re-checks quorum and every individual
-  credential/tier. The finance demo ends in:
+  credential/tier. A partial quorum never spends the single-use nonce and its
+  HOLD is never cached as a terminal verdict. The finance demo ends in:
   `Anomalous wire pattern -> FREEZE merchant-account-884 -> HOLD for Risk Officer`.
 
 ### Clinical & Healthcare controls
@@ -223,9 +224,12 @@ pack without editing code.
   tainted chain.
 - **Signed external egress** — `AGENT_BLOCK_TAINTED_EGRESS=true` blocks publishing
   tainted/restricted decisions (for example to the Atlassian bridge) unless a
-  verified detached or OIDC sign-off covers the exact egress target. A bare name,
-  an unverified credential or a mismatched target never clears the gate. Use
-  `python -m agents publish-decision <id> --signoff <approved-id>`.
+  verified detached or OIDC sign-off binds to both the **exact destination**
+  (`egress_target`) and a **digest of the exact decision payload**
+  (`egress_payload_digest`). Both fields are covered by the signed approval record
+  and the human's credential, so a sign-off for one sink or payload cannot be
+  replayed for another. A governed-action target such as `sandbox/<noun>` is not
+  a sink binding. Use `python -m agents publish-decision <id> --signoff <approved-id>`.
   The healthcare demo ends in:
   `Conflicting medication/lab feed -> PAUSE automated-dispense-queue -> HOLD for Attending Clinician`.
 
@@ -284,7 +288,7 @@ override its DENY.
 | approval does not cover this action, target and mission | **DENY** |
 | approval is approved and covers the action, target and mission | **ALLOW** + scoped authorization ref (TTL 900 s) |
 | CYBER DEFENSE task matching prohibited offensive intent | **DENY** before the model runs |
-| tainted/restricted data egress without a verified signed sign-off covering the target | **DENY** (Clinical pack) — no external publication |
+| tainted/restricted data egress without a verified sign-off bound to the exact destination and payload digest | **DENY** (Clinical pack) — no external publication |
 
 Runtime behaviour is consistent: `HOLD` returns a typed `Handoff`, `DENY` returns
 a typed `Failure`, `ALLOW` attaches `policy_decision_ref`, `authorization_ref`
@@ -582,9 +586,9 @@ just a laptop. The full threat model and deployment checklist are in
 | read-only service | `/health` and `/ready` only, counts-only and redacted; `/diagnostics` is admin-only and hidden without `AGENT_ADMIN_TOKEN` |
 | role profiles | four Starter Packs filter capability-card role views only; all nine coordinators, ACLs, tiers and signed cards stay intact; unknown profile fails closed |
 | transaction ceiling | `AGENT_MAX_TRANSACTION_AMOUNT` is a hard execution-time ceiling in the FinOps pack; approvals bind the exact amount/currency and cannot raise the ceiling |
-| approval quorum | dual-approver HITL requires distinct verified humans; a partial quorum stays `PENDING` and the execution gate re-checks every decision |
+| approval quorum | dual-approver HITL requires distinct verified humans; a partial quorum stays `PENDING`, cannot spend the nonce or be cached as an ALLOW, and the execution gate re-checks every decision |
 | PII/PHI taint | every connector can classify health/personal data, raising it to `RESTRICTED` with monotone taint that survives correlation, approval and evidence |
-| signed egress guard | tainted/restricted data cannot be published externally without a verified detached/OIDC sign-off covering the exact target (Clinical pack) |
+| signed egress guard | tainted/restricted data cannot be published externally without a verified detached/OIDC sign-off bound to the exact destination and payload digest (Clinical pack) |
 
 ```powershell
 # Generate the cluster secret and health token.
@@ -687,7 +691,7 @@ full trust-bundle format, key custody, rotation and checklist.
 | finance transaction beyond the mandate | hard per-transaction ceiling rechecked at execution time; amount and currency bound into the approval; no silent conversion or sum drift |
 | one human approving twice / collusion | quorum counts distinct verified humans only; duplicate approvers rejected and each credential/tier rechecked at execution |
 | PII/PHI leaking through a connector | detection on every connector raises classification to `RESTRICTED` and sets taint; label flows through correlation, proposal, approval and evidence as one monotone chain |
-| tainted data exported externally | egress guard blocks bridge publication unless a verified detached/OIDC sign-off covers the exact target; a name, unverified credential or mismatched target never clears it |
+| tainted data exported externally | egress guard blocks bridge publication unless a verified detached/OIDC sign-off binds to the exact destination and payload digest; a name, unverified credential, mismatched sink or different payload never clears it |
 | buyer pack widening privileges | profiles only filter role views; ACLs, tool scopes and tiers come from the signed cards and are identical in every pack |
 | over-broad peer delegation | generated topic ACLs + mutually consistent sender/recipient and action/target scopes on every card |
 | one slow agent | bounded per-agent queue and `max_concurrency` |

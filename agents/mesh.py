@@ -237,6 +237,11 @@ class Mesh:
                 max_transaction_amount=parse_amount(self.settings.max_transaction_amount),
                 transaction_currency=self.settings.transaction_currency,
                 approval_quorum=self.settings.approval_quorum,
+                egress_target=(
+                    f"atlassian:{self.settings.atlassian_base_url or 'adr'}"
+                    if self.settings.block_tainted_egress
+                    else None
+                ),
             ),
             self.approvals,
             self.approver_registry,

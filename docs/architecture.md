@@ -270,7 +270,11 @@ finite, non-negative, at most four decimal places). Amount and currency are
 bound into the approval request, so a re-dispatch with a different sum or a
 foreign currency is DENIED. `AGENT_APPROVAL_QUORUM=2` requires two distinct
 verified humans; a first decision stays `PENDING`, duplicates are rejected, and
-the execution gate rechecks every credential and `max_tier`.
+the execution gate rechecks every credential and `max_tier`. A partial quorum
+never spends the single-use nonce (`ApprovalStore.consume()` requires an
+`APPROVED`, complete, distinct quorum) and a HOLD is returned as a `Handoff`
+without writing to the idempotency result cache, so a redelivery rechecks the
+current state instead of replaying a stale terminal verdict.
 
 **Clinical & Healthcare.** `security.detect_sensitive_data()` runs on every
 connector record when `AGENT_PHI_DETECTION_ENABLED=true`. A positive label raises
@@ -278,8 +282,12 @@ classification to `RESTRICTED`, sets monotone taint and attaches
 `sensitive_labels`, which survive correlation, the proposal, the approval
 `taint_hash` disclosure and evidence. `agents/egress.py` blocks external
 publication of tainted/restricted decisions unless a verified detached/OIDC
-sign-off covers the exact target (`AGENT_BLOCK_TAINTED_EGRESS=true`);
-`agents publish-decision <id> --signoff <approved-id>` supplies it.
+sign-off binds to both the exact destination (`egress_target`) and a digest of
+the exact decision payload (`egress_payload_digest`)
+(`AGENT_BLOCK_TAINTED_EGRESS=true`). Both fields are signed into the approval and
+into the human credential; `also_targets` naming a governed action never
+satisfies the sink binding. `agents publish-decision <id> --signoff <approved-id>`
+supplies the sign-off.
 
 **Compliance exports.** `agents/evidence.py:render_export()` renders read-only
 `jsonl`, `oekp`, `bengal` and `oekp_bengal` views over the verified hash/MAC
@@ -572,11 +580,13 @@ The suite covers the invariants that break multi-agent systems:
 * strict money parsing, hard transaction ceiling, currency pinning, exact
   amount/currency approval binding
 * dual-approver quorum: distinct humans, partial `PENDING`, single-approver
-  fallback
+  fallback, no nonce consumption before quorum, HOLD not cached as a terminal
+  verdict
 * PII/PHI detection (keys and values), `MappingAdapter` reclassification to
   `RESTRICTED`, monotone taint/label propagation through correlation
-* egress guard: verified detached/OIDC sign-off, target coverage, pending and
-  unverified rejections
+* egress guard: verified detached/OIDC sign-off bound to exact destination and
+  payload digest; rejection of governed-action targets, mismatched digests,
+  pending and unverified records
 * all four export formats plus fail-closed verification
 * exact cross-vertical Money Shot mappings and shared five-beat shape
 
@@ -595,7 +605,7 @@ governance to land before higher-risk autonomy.
 | C — Communication architecture | `contracts.py`, `bus.py`, this document | Protobuf/gRPC, authenticated service identity |
 | D — Implementation blueprint | package layout and composition root | service boundaries for role workers |
 | E — Security and governance | `governance.py`, `evidence.py`, `security.py`, `usoc_agents.py`, `egress.py`, `trust.py`, `oidc.py`, `profiles.py` | OPA/Rego, per-agent keys, signed authorization artifacts |
-| F — Test and verification | 274 passed + 1 symlink skip across contracts, bus, runtime, routing, governance, security, wave recovery, zero-trust tiers, role profiles and vertical controls | integration, performance, fault-injection suites |
+| F — Test and verification | 279 passed + 1 symlink skip across contracts, bus, runtime, routing, governance, security, wave recovery, zero-trust tiers, role profiles and vertical controls | integration, performance, fault-injection suites |
 | G — Phased roadmap | phases below | resource and delivery schedule |
 | H — Operational readiness | `health` and diagnostics | evidence-backed maturity assessment per subsystem |
 
