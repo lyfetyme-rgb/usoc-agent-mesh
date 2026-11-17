@@ -24,12 +24,12 @@ from .governance import ApprovalStore, FileApprovalStore, PolicyConfig, PolicyEn
 from .llm import EchoLLM, LLM, build_llm
 from .observability import Metrics, configure_logging, log
 from .orchestrator import LLMPlanner, Orchestrator, Planner, RouterPlanner
-from .registry import Registry, load_registry
+from .registry import Registry, SubsystemSpec, load_registry
 from .runtime import SubsystemAgent
 from .security import SecurityError, Signer, build_signer, configured_approvers
 from .shell import Shell
 from .store import InMemoryStore, RedisStore, StateStore
-from .tools import build_default_tools
+from .tools import ToolRegistry, build_default_tools, scoped_tool_registry
 from .usoc_agents import AiceeAgent, BengalAgent, HitlAgent, OekpAgent, SeraphimAgent
 
 AGENT_CLASSES: dict[str, type[SubsystemAgent]] = {
@@ -39,6 +39,28 @@ AGENT_CLASSES: dict[str, type[SubsystemAgent]] = {
     "oekp": OekpAgent,
     "bengal": BengalAgent,
 }
+
+
+def validate_agent_tiers(
+    specs: list[SubsystemSpec],
+    classes: dict[str, type[SubsystemAgent]] | None = None,
+) -> None:
+    """Fail startup if a deterministic card maps to an LLM-capable class.
+
+    A label without an implementation check is just marketing. The capability
+    card and the Python class must agree in both directions: a deterministic
+    class cannot be downgraded to an LLM tier by accident either.
+    """
+    implementations = AGENT_CLASSES if classes is None else classes
+    for spec in specs:
+        cls = implementations.get(spec.id, SubsystemAgent)
+        impl_deterministic = bool(getattr(cls, "deterministic", False))
+        card_deterministic = spec.model_tier == "deterministic"
+        if impl_deterministic != card_deterministic:
+            raise SecurityError(
+                f"{spec.id}: model_tier={spec.model_tier!r} does not match "
+                f"{cls.__name__}.deterministic={impl_deterministic}"
+            )
 
 
 class Mesh:
@@ -78,6 +100,9 @@ class Mesh:
         self.evidence: EvidenceChain | None = None
         self.signer: Signer | None = None
         self.agents: dict[str, SubsystemAgent] = {}
+        # Per-agent registries. CSSSF gets a scoped registry; other agents keep
+        # the base one so their workspace tools are not silently narrowed.
+        self.agent_tools: dict[str, ToolRegistry] = {}
         self.orchestrator: Orchestrator | None = None
         self.shell: Shell | None = None
         self.fragmentation: FragmentationService | None = None
@@ -96,6 +121,7 @@ class Mesh:
             allow_delete=self.settings.allow_workspace_delete,
         )
         self.registry = load_registry(self._registry_path, tools, settings=self.settings)
+        validate_agent_tiers(self.registry.subsystems)
         if self._bus_override is not None:
             self.bus = self._bus_override
             # An injected bus (tests, custom transports) still gets message auth.
@@ -169,12 +195,22 @@ class Mesh:
                     f"AGENT worker agents not in registry: {', '.join(unknown)}"
                 )
             specs = [spec for spec in specs if spec.id in self._agents_filter]
+        self.agent_tools = {
+            spec.id: (
+                scoped_tool_registry(
+                    tools, workspace=self._workspace, scopes=spec.tool_scopes
+                )
+                if spec.tool_scopes
+                else tools
+            )
+            for spec in specs
+        }
         self.agents = {
             spec.id: AGENT_CLASSES.get(spec.id, SubsystemAgent)(
                 spec,
                 self.bus,
                 llm=self.llm,
-                tools=tools,
+                tools=self.agent_tools[spec.id],
                 settings=self.settings,
                 store=self.store,
                 metrics=self.metrics,

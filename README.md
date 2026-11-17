@@ -38,11 +38,14 @@ python -m agents demo            # one governed goal end to end
 python -m agents health          # SHELL health + diagnostics
 python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
-python -m pytest -q              # 186 tests, no network
+python -m pytest -q              # 206 passed, 1 env-gated skip, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
-flow is visible before you wire a provider. It seeds
+flow is visible before you wire a provider. It preflights the evidence chain and
+fails closed with an actionable message if the workspace holds records signed by
+a different process secret — use `python -m agents --workspace <fresh-dir> demo`
+or set `AGENT_SHARED_SECRET` to the original key. It seeds
 `workspace/inbox/telemetry.jsonl` and plans:
 
 ```
@@ -62,7 +65,7 @@ the bridge is opt-in and its tests use an injected HTTP transport.
 
 | Time | Show | Point |
 |---|---|---|
-| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Three commits: offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge. Clean remote, 186 tests passing. |
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Three commits: offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge. Clean remote, 206 passing with 1 symlink skip. |
 | 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
 | 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
 | 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |
@@ -89,17 +92,23 @@ constitution and reusable scripts/templates live in [toolbox/](toolbox/README.md
 
 ## The nine subsystems
 
-| id | roles | job |
-|---|---|---|
-| `aicee` | 14 | Operational intelligence: anomalies, forecasts, root cause, recommendations. Advises only. |
-| `acie` | 10 | Edge telemetry, network state, digital twin, connectivity and edge integrity. |
-| `seraphim` | 12 | Policy decision point: identity, scope, risk, compliance, ALLOW/HOLD/DENY/CONTAIN. |
-| `cohesion` | 9 | Mission intent, requirements, dependencies, priorities and cross-subsystem plans. |
-| `bengal` | 9 | Independent assurance and validation against evidence. |
-| `csssf` | 10 | Controlled sandboxes, change rehearsal, fault injection, simulation results. |
-| `oekp` | 8 | Evidence, provenance, integrity hashes, audit trail, decision lineage. |
-| `cyber_defense` | 11 | Defensive security: vulnerability assessment, triage, detection, containment planning. |
-| `hitl` | 10 | Human governance: decision presentation, approval routing, escalation, oversight. |
+| id | tier | roles | job |
+|---|---|---|---|
+| `aicee` | `strong` (LLM) | 14 | Operational intelligence: anomalies, forecasts, root cause, recommendations. Advises only. |
+| `acie` | `fast` (LLM) | 10 | Edge telemetry, network state, digital twin, connectivity and edge integrity. |
+| `seraphim` | `deterministic` / no LLM | 12 | Policy decision point: identity, scope, risk, compliance, ALLOW/HOLD/DENY/CONTAIN. |
+| `cohesion` | `strong` (LLM) | 9 | Mission intent, requirements, dependencies, priorities and cross-subsystem plans. |
+| `bengal` | `deterministic` / no LLM | 9 | Independent assurance and validation against evidence. |
+| `csssf` | `fast` (LLM), sandboxed tools | 10 | Controlled sandboxes, change rehearsal, fault injection, simulation results. |
+| `oekp` | `deterministic` / no LLM | 8 | Evidence, provenance, integrity hashes, audit trail, decision lineage. |
+| `cyber_defense` | `fast` (LLM) | 11 | Defensive security: vulnerability assessment, triage, detection, containment planning. |
+| `hitl` | `deterministic` / no LLM | 10 | Human governance: decision presentation, approval routing, escalation, oversight. |
+
+`deterministic` is a runtime contract, not a label: those cards must map to
+deterministic Python implementations at startup, and `BaseAgent` refuses any
+LLM call or model-driven tool call for them. No model is secretly in the loop.
+CSSSF is LLM-backed, but every `workspace.read`/`workspace.write` path is
+chrooted to `workspace/sandbox/` by its per-agent `ToolRegistry`.
 
 **93 subsystem roles.** The seven SHELL roles are implemented as infrastructure,
 not as a tenth domain agent:
@@ -117,7 +126,20 @@ not as a tenth domain agent:
 Capability cards are the only thing the planner sees. Renaming or rewiring a
 subsystem never touches orchestration code. Each card carries `capabilities`,
 `keywords`, `roles`, `tools` and optional `subscribes` topics; both routing
-quality and least-privilege tool access come from that file.
+quality and least-privilege tool access come from that file. A card may also
+declare `tool_scopes`; CSSSF declares `workspace.read` and `workspace.write` as
+`sandbox/`, so the mesh builds it a separate, path-chrooted `ToolRegistry`.
+Traversal (`../`), absolute paths and symlinks that resolve outside `sandbox/`
+are rejected before the base tool runs.
+
+Cards are also the authorization matrix. Each declares `allowed_recipients`,
+`allowed_senders`, `allowed_action_classes` and `allowed_targets`, and the topic
+ACLs are generated from them. The shipped mesh is consistent by construction:
+if A may delegate to B, B must name A in `allowed_senders`. Only CSSSF
+(`execute`, `sandbox/*`) and CYBER DEFENSE (`contain`, `sandbox/*` and
+`staging/*`) can receive governed actions; every other coordinator is limited
+to read-only/recommend work. `python -m pytest` checks that matrix so a card
+cannot quietly widen a peer's privileges.
 
 ## Governance, not vibes
 
@@ -153,6 +175,7 @@ override its DENY.
 | target outside the allowlist (`sandbox/*`, `staging/*` by default) | **DENY** |
 | `restricted` data without a `mission_id` | **DENY** |
 | governed action, no approval reference | **HOLD** — an approval request is created |
+| governed action with tainted upstream provenance | **HOLD** with taint disclosed; a clean approval cannot authorize it |
 | approval is still pending | **HOLD** |
 | approval was denied | **DENY** |
 | approval has expired since it was decided | **DENY** |
@@ -163,6 +186,13 @@ override its DENY.
 Runtime behaviour is consistent: `HOLD` returns a typed `Handoff`, `DENY` returns
 a typed `Failure`, `ALLOW` attaches `policy_decision_ref`, `authorization_ref`
 and `evidence_ref` to the result.
+
+Taint is monotone across the DAG. `_run_step` unions the provenance and taint of
+every dependency into the outbound `TaskSpec`; the runtime copies it onto the
+`TaskResult` even when a handler returns a default-clean result. A tainted
+upstream result therefore stays tainted through any number of clean-looking
+intermediaries, and SERAPHIM refuses to reuse an approval that was issued
+without the same taint disclosure.
 
 ### Human approval walkthrough
 
@@ -200,6 +230,41 @@ process from the mesh; with Redis an explicit secret is mandatory.
 previous record, so modifying or deleting an entry breaks verification. OEKP
 appends; BENGAL independently recomputes and reports the failure. Governed
 execution results are recorded automatically by the runtime gate.
+
+### Wave failure and compensation
+
+A wave is every step whose dependencies are satisfied; independent steps run in
+one `asyncio.gather`. The wave runs to completion, then the orchestrator checks
+results in plan order. If a step fails, the goal fails — but the report includes
+**every** step that ran in that wave, not just the ones before the failure. A
+`goal.failed` event is published alongside the typed `GoalResult`.
+
+Because a wave runs to completion even when a sibling raises, **at most one
+mutating step (`execute`/`contain`) may be ready in a wave**. `validate_plan`
+assigns each step a topological layer and rejects a plan with two governed steps
+in the same layer; `_execute` re-checks defensively before dispatching anything.
+Serialization is explicit: a second governed step must depend on an earlier one.
+Non-mutating siblings still run concurrently.
+
+There is no automatic, model-invented undo. A governed step that changes the
+world may declare `compensate` (agent, objective, action class, target, risk and
+optionally an approval id). On failure the orchestrator walks successful
+governed steps in reverse and dispatches each declared compensation through the
+**same** runtime policy gate, approval store and evidence chain as the original
+work:
+
+| compensation outcome | meaning |
+|---|---|
+| `done` | policy ALLOW, undo executed, governance refs recorded |
+| `hold` | a human decision is required; the approval id is returned |
+| `denied` | policy or sender scope refused the undo; no execution |
+| `failed` | handler error, timeout or an `ok=False` result |
+
+Successful governed steps with no declared undo are listed in
+`GoalResult.uncompensated`. That is deliberate: a partial wave is reported as
+partial, never as a clean rollback. A governed step can carry `approval_ref`,
+so an already-decided human approval can be re-dispatched by the planner
+without inventing a new id.
 
 ## Solving fragmentation: read, correlate, govern
 
@@ -424,6 +489,8 @@ $env:AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY="true"
 |---|---|
 | unauthorized change | deterministic policy gate + human approval + target allowlist |
 | AI overriding a DENY | policy decisions are code, not model output |
+| hidden LLM in a deterministic coordinator | startup card/class check plus `BaseAgent` no-LLM guard; no model call is possible |
+| sandbox rehearsal overwriting live artifacts | CSSSF `workspace.read`/`write` chrooted to `sandbox/` at the tool-runtime layer, with traversal and symlink escapes rejected |
 | forged or edited bus messages | sender-bound HMAC; failures are quarantined in the DLQ |
 | approval replay against another target or mission | approval must match action, target and mission |
 | self-approval or an unknown approver | allowlist + requester != approver |
@@ -435,11 +502,15 @@ $env:AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY="true"
 | redirect loops A->B->A | `hop` counter, capped at 8, enforced by the contract |
 | stuck work | per-message deadline + timeout on every handler |
 | broker redelivery | `idempotency_key` + result cache, so side effects happen once |
+| transient provider failure | bounded exponential backoff before requeue (`AGENT_RETRY_BACKOFF_BASE_S`/`_MAX_S`) |
+| partial wave failure | at most one mutating step per wave; whole wave reported, declared undos dispatched in reverse through policy/HITL, undeclared changes listed as `uncompensated` |
+| indirect prompt injection through telemetry | monotone taint/provenance across every DAG hop; tainted actions need an approval that discloses the same chain |
+| over-broad peer delegation | generated topic ACLs + mutually consistent sender/recipient and action/target scopes on every card |
 | one slow agent | bounded per-agent queue and `max_concurrency` |
 | runaway spend | per-step token budget, fast model tier for light agents |
 | silent failure | typed `Failure`, dead-letter list, one trace id |
 | bad plan | owners and dependencies validated before any step runs |
-| long serial chains | independent steps run in one `asyncio.gather` wave |
+| long serial chains | independent **non-mutating** steps run in one `asyncio.gather` wave; governed steps serialize |
 
 ## Go durable
 

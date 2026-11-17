@@ -31,6 +31,7 @@ from .bus import Bus
 from .config import Settings
 from .contracts import (
     GOVERNED_ACTIONS,
+    Compensation,
     ErrorCode,
     Failure,
     GoalResult,
@@ -63,6 +64,15 @@ Rules:
 - action_class is one of: read_only, recommend, simulate, execute, contain.
   Use read_only for analysis and evidence. Use execute or contain only for a change to a real target,
   and then a concrete target string is mandatory. A policy gate decides whether it runs.
+- A step with action_class execute or contain must include "compensate": an object with
+  agent, objective, action_class, target and risk that reverses the change. Use null only
+  when there is no honest undo; the goal result then reports the step as uncompensated.
+  The orchestrator never invents a compensation from model prose.
+- A governed step may also include "approval_ref" with the id of a human decision.
+  Without one it will HOLD and the goal will fail; never invent an approval id.
+- At most one governed step (execute/contain) may be ready in any wave. Add a
+  dependency between governed steps so they serialize; two mutating steps may
+  never run in parallel just because they look independent.
 """
 
 
@@ -77,6 +87,12 @@ class Planner(Protocol):
 def validate_plan(plan: Plan, registry: Registry) -> Plan:
     known = registry.by_id
     seen: set[str] = set()
+    # A wave is the set of steps whose dependencies are already satisfied. Track
+    # the static topological layer so a plan cannot put two world-changing steps
+    # in one asyncio.gather: a failure after one committed would leave split
+    # state even if the other step was "probably independent".
+    layer: dict[str, int] = {}
+    governed_by_layer: dict[int, list[str]] = {}
     for step in plan.steps:
         if step.agent not in known:
             raise PlanError(f"step {step.id}: unknown agent {step.agent!r}")
@@ -87,9 +103,19 @@ def validate_plan(plan: Plan, registry: Registry) -> Plan:
             raise PlanError(f"step {step.id}: dependencies must be earlier steps, got {unknown_deps}")
         if step.action_class in GOVERNED_ACTIONS and not step.target:
             raise PlanError(f"step {step.id}: {step.action_class.value} requires an explicit target")
+        level = max((layer[dep] + 1 for dep in step.depends_on), default=0)
+        layer[step.id] = level
+        if step.action_class in GOVERNED_ACTIONS:
+            governed_by_layer.setdefault(level, []).append(step.id)
         seen.add(step.id)
     if not plan.steps:
         raise PlanError("plan has no steps")
+    for level, ids in governed_by_layer.items():
+        if len(ids) > 1:
+            raise PlanError(
+                f"wave {level} has multiple mutating steps {ids}; "
+                "governed steps must be serialized with an explicit dependency"
+            )
     return plan
 
 
@@ -237,6 +263,13 @@ class Orchestrator:
             return await self._execute(plan, trace_id, started)
 
     async def _execute(self, plan: Plan, trace_id: str, started: float) -> GoalResult:
+        # Planners validate, but a caller can inject a Plan directly. Re-check here
+        # so an untrusted or buggy planner cannot put two mutating steps in one wave.
+        try:
+            validate_plan(plan, self.registry)
+        except PlanError as exc:
+            return await self._fail(plan, trace_id, started, {}, f"invalid plan: {exc}")
+
         deadline = datetime.now(timezone.utc) + timedelta(
             seconds=self.settings.plan_timeout_s + len(plan.steps) * self.settings.task_timeout_s
         )
@@ -247,17 +280,47 @@ class Orchestrator:
         while len(done) < len(plan.steps):
             ready = [s for s in plan.steps if s.id not in done and set(s.depends_on) <= done]
             if not ready:
-                return self._fail(plan, trace_id, started, results, "plan contains a dependency cycle")
+                return await self._fail(plan, trace_id, started, results, "plan contains a dependency cycle")
+            mutating = [s.id for s in ready if s.action_class in GOVERNED_ACTIONS]
+            if len(mutating) > 1:
+                # Defence in depth: validation above already rejects this, but a
+                # plan can be mutated after planning. Refuse before any side effect.
+                return await self._fail(
+                    plan,
+                    trace_id,
+                    started,
+                    results,
+                    f"refusing wave with multiple mutating steps {mutating}",
+                )
 
             outcomes = await asyncio.gather(
                 *(self._run_step(step, plan, results, trace_id, deadline) for step in ready),
                 return_exceptions=True,
             )
+            # Record the whole wave before failing. A wave runs to completion, so
+            # siblings of a failed step really did execute; hiding them would make
+            # the failure report and the compensation pass both incomplete.
             for step, outcome in zip(ready, outcomes):
                 done.add(step.id)
                 if isinstance(outcome, BaseException):
                     log("step.crashed", step=step.id, error=repr(outcome))
-                    return self._fail(plan, trace_id, started, results, f"step {step.id} crashed: {outcome}")
+                    provenance, tainted = self._taint_context(step, results)
+                    results[step.id] = self._failed_result(repr(outcome), provenance, tainted)
+                    record = {
+                        "id": step.id,
+                        "agent": step.agent,
+                        "ok": False,
+                        "output": "",
+                        "ms": 0,
+                        "tokens": 0,
+                        "action_class": step.action_class.value,
+                        "target": step.target,
+                        "provenance": provenance,
+                        "tainted": tainted,
+                        "error": repr(outcome),
+                    }
+                    records[step.id] = record
+                    continue
                 result, ms = outcome
                 results[step.id] = result
                 records[step.id] = {
@@ -269,12 +332,21 @@ class Orchestrator:
                     "tokens": result.tokens_used,
                     "action_class": step.action_class.value,
                     "target": step.target,
+                    "approval_ref": step.approval_ref,
+                    "provenance": result.provenance,
+                    "tainted": result.tainted,
                     "policy_decision_ref": result.policy_decision_ref,
                     "authorization_ref": result.authorization_ref,
                     "evidence_ref": result.evidence_ref,
+                    "error": result.error,
                 }
-                if not result.ok:
-                    return self._fail(plan, trace_id, started, results, f"step {step.id} failed: {result.error}")
+            for step in ready:
+                record = records[step.id]
+                if not record["ok"]:
+                    return await self._fail(
+                        plan, trace_id, started, results,
+                        f"step {step.id} failed: {record['error']}"
+                    )
 
         answer = await self._synthesize(plan, results)
         total_tokens = sum(r.tokens_used for r in results.values())
@@ -299,6 +371,35 @@ class Orchestrator:
             elapsed_ms=elapsed,
         )
 
+    @staticmethod
+    def _taint_context(
+        step: Step, results: dict[str, TaskResult]
+    ) -> tuple[list[str], bool]:
+        """Aggregate declared and inherited taint for one step.
+
+        Every hop keeps the full chain, so a governed step cannot launder poisoned
+        telemetry by depending on a clean-looking intermediary.
+        """
+        provenance = list(step.provenance)
+        tainted = step.tainted
+        for dep in step.depends_on:
+            result = results.get(dep)
+            if result is None:
+                continue
+            provenance.extend(result.provenance)
+            tainted = tainted or result.tainted
+        return list(dict.fromkeys(provenance)), tainted
+
+    @staticmethod
+    def _failed_result(error: str, provenance: list[str], tainted: bool) -> TaskResult:
+        """A failed hop still carries the taint of the chain that reached it."""
+        return TaskResult(
+            ok=False,
+            error=error,
+            provenance=list(provenance),
+            tainted=tainted,
+        )
+
     async def _run_step(
         self, step: Step, plan: Plan, results: dict[str, TaskResult], trace_id: str, deadline: datetime
     ) -> tuple[TaskResult, int]:
@@ -307,16 +408,7 @@ class Orchestrator:
             for dep in step.depends_on
             if dep in results
         }
-        # Aggregate taint from every upstream step this one depends on. A plan
-        # built from advisory output (AICEE/COHESION) keeps the provenance of the
-        # telemetry that fed it, so SERAPHIM sees the real chain, not just the
-        # identity of the agent that forwarded it.
-        provenance = list(step.provenance)
-        tainted = step.tainted
-        for dep in step.depends_on:
-            if dep in results:
-                provenance.extend(results[dep].provenance)
-                tainted = tainted or results[dep].tainted
+        provenance, tainted = self._taint_context(step, results)
         inputs = {
             "goal": plan.goal,
             "step_id": step.id,
@@ -337,6 +429,7 @@ class Orchestrator:
             action_class=step.action_class,
             target=step.target,
             risk=step.risk,
+            approval_ref=step.approval_ref,
             mission_id=self.mission_id,
             provenance=list(dict.fromkeys(provenance)),
             tainted=tainted,
@@ -346,11 +439,11 @@ class Orchestrator:
         payload = await self._request(msg)
         ms = int((time.perf_counter() - started) * 1000)
         if isinstance(payload, Failure):
-            return TaskResult(ok=False, error=f"{payload.code}: {payload.message}"), ms
+            return self._failed_result(f"{payload.code}: {payload.message}", provenance, tainted), ms
         if isinstance(payload, Handoff):
-            return TaskResult(ok=False, error=f"handoff required: {payload.instruction}"), ms
+            return self._failed_result(f"handoff required: {payload.instruction}", provenance, tainted), ms
         if not isinstance(payload, TaskResult):
-            return TaskResult(ok=False, error=f"unexpected reply {type(payload).__name__}"), ms
+            return self._failed_result(f"unexpected reply {type(payload).__name__}", provenance, tainted), ms
         log("step.done", step=step.id, ok=payload.ok, ms=ms)
         return payload, ms
 
@@ -391,7 +484,7 @@ class Orchestrator:
             log("goal.synthesis_failed", error=repr(exc))
             return "\n\n".join(f"### {step.agent}\n{result.output}" for step, result in zip(plan.steps, ordered))
 
-    def _fail(
+    async def _fail(
         self,
         plan: Plan,
         trace_id: str,
@@ -402,16 +495,165 @@ class Orchestrator:
         self.metrics.inc("goal.failed")
         log("goal.failed", reason=reason)
         owners = {step.id: step.agent for step in plan.steps}
-        completed = [
-            {"id": sid, "agent": owners.get(sid, "?"), "output": result.output}
-            for sid, result in results.items()
-        ]
+        kinds = {
+            step.id: (step.action_class.value, step.target, step.approval_ref)
+            for step in plan.steps
+        }
+        completed = []
+        for sid, result in results.items():
+            action_class, target, approval_ref = kinds.get(sid, ("?", None, None))
+            completed.append(
+                {
+                    "id": sid,
+                    "agent": owners.get(sid, "?"),
+                    "ok": result.ok,
+                    "output": result.output,
+                    "tokens": result.tokens_used,
+                    "action_class": action_class,
+                    "target": target,
+                    "approval_ref": approval_ref,
+                    "provenance": result.provenance,
+                    "tainted": result.tainted,
+                    "policy_decision_ref": result.policy_decision_ref,
+                    "authorization_ref": result.authorization_ref,
+                    "evidence_ref": result.evidence_ref,
+                    "error": result.error,
+                }
+            )
+        compensations, uncompensated = await self._compensate(plan, trace_id, results)
+        await self.bus.publish(
+            Message.event(
+                sender=self.id,
+                name="goal.failed",
+                correlation_id=trace_id,
+                data={
+                    "reason": reason,
+                    "steps": len(completed),
+                    "compensations": len(compensations),
+                    "uncompensated": uncompensated,
+                },
+            )
+        )
+        if compensations:
+            await self.bus.publish(
+                Message.event(
+                    sender=self.id,
+                    name="goal.compensated",
+                    correlation_id=trace_id,
+                    data={"records": compensations},
+                )
+            )
         return GoalResult(
             goal=plan.goal,
             ok=False,
             answer=reason,
             correlation_id=trace_id,
             steps=completed,
+            compensations=compensations,
+            uncompensated=uncompensated,
             tokens_used=sum(r.tokens_used for r in results.values()),
             elapsed_ms=int((time.perf_counter() - started) * 1000),
         )
+
+    async def _compensate(
+        self, plan: Plan, trace_id: str, results: dict[str, TaskResult]
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Undo successfully completed governed steps, newest first.
+
+        Only steps that actually changed the world are candidates, and only if
+        they declared an undo. Compensation is dispatched as an ordinary task so
+        the runtime policy gate, human approvals and evidence chain all apply.
+        """
+        records: list[dict[str, Any]] = []
+        uncompensated: list[str] = []
+        for step in reversed(plan.steps):
+            result = results.get(step.id)
+            if result is None or not result.ok or step.action_class not in GOVERNED_ACTIONS:
+                continue
+            if step.compensate is None:
+                uncompensated.append(step.id)
+                continue
+            records.append(await self._run_compensation(step, step.compensate, result, trace_id))
+        return records, uncompensated
+
+    async def _run_compensation(
+        self,
+        step: Step,
+        comp: Compensation,
+        source: TaskResult,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        key = hashlib.sha256(
+            f"{trace_id}|{step.id}|compensate|{comp.objective}".encode()
+        ).hexdigest()[:32]
+        msg = Message.task(
+            sender=self.id,
+            recipient=comp.agent,
+            objective=comp.objective,
+            inputs={
+                "goal": "compensate a failed goal",
+                "step_id": step.id,
+                "compensating_for": step.objective,
+                "prior_output": source.output[:2_000],
+            },
+            expected="Reverse the original action and report exactly what was undone.",
+            budget_tokens=self.settings.max_tokens_per_step,
+            correlation_id=f"{trace_id}:comp:{step.id}",
+            deadline=datetime.now(timezone.utc)
+            + timedelta(seconds=self.settings.task_timeout_s),
+            idempotency_key=key,
+            action_class=comp.action_class,
+            target=comp.target,
+            risk=comp.risk,
+            approval_ref=comp.approval_ref,
+            mission_id=self.mission_id,
+            provenance=list(source.provenance),
+            tainted=source.tainted,
+            justification=f"Compensation for failed goal after step {step.id}",
+        )
+        base: dict[str, Any] = {
+            "step": step.id,
+            "agent": comp.agent,
+            "action_class": comp.action_class.value,
+            "target": comp.target,
+            "approval_ref": comp.approval_ref,
+        }
+        log("compensation.start", step=step.id, agent=comp.agent)
+        try:
+            payload = await self._request(msg)
+        except Exception as exc:  # a failed undo must be reported, not raised out of _fail
+            payload = Failure(code=ErrorCode.HANDLER.value, message=repr(exc))
+
+        if isinstance(payload, Handoff):
+            base.update(
+                status="hold",
+                approval_ref=payload.approval_ref or comp.approval_ref,
+                detail=payload.instruction,
+            )
+        elif isinstance(payload, Failure):
+            denied = {
+                "policy_denied",
+                "policy_error",
+                "sender_not_permitted",
+                ErrorCode.DEADLINE.value,
+            }
+            base.update(
+                status="denied" if payload.code in denied else "failed",
+                detail=f"{payload.code}: {payload.message}",
+            )
+        elif isinstance(payload, TaskResult):
+            if payload.ok:
+                base.update(
+                    status="done",
+                    detail=payload.output,
+                    policy_decision_ref=payload.policy_decision_ref,
+                    authorization_ref=payload.authorization_ref,
+                    evidence_ref=payload.evidence_ref,
+                )
+            else:
+                base.update(status="failed", detail=payload.error or payload.output)
+        else:
+            base.update(status="failed", detail=f"unexpected reply {type(payload).__name__}")
+        self.metrics.inc(f"compensation.{base['status']}")
+        log("compensation.result", step=step.id, status=base["status"])
+        return base

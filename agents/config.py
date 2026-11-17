@@ -130,6 +130,9 @@ class Settings(BaseSettings):
     max_concurrency: int = 4
     task_timeout_s: float = 120.0
     max_attempts: int = 3
+    # Bounded exponential backoff between requeues of a RetryableError.
+    retry_backoff_base_s: float = 0.25
+    retry_backoff_max_s: float = 2.0
     max_hops: int = 8
     plan_timeout_s: float = 90.0
     max_tokens_per_step: int = 8_000

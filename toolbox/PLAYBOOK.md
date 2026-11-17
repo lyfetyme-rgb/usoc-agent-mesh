@@ -41,6 +41,23 @@ Each step below is complete unless marked **OPEN**.
    silently disabled the bridge for anyone following the docs).
 8. **Demo recorded and pinned** — `README.md` carries the 3-minute storyboard;
    it is the artifact you show.
+9. **Post-demo hardening (complete)** — wave failures now report every step in
+   the wave, publish `goal.failed`, and run declared compensations in reverse
+   through the same policy/HITL/evidence gate; undeclared changes are named as
+   `uncompensated`. Retryable errors use bounded exponential backoff. Every
+   capability card now declares a mutually consistent sender/recipient matrix
+   and action/target scope, with only CSSSF and CYBER DEFENSE able to receive
+   governed work. Governed steps and compensations can carry a human
+   `approval_ref`.
+10. **Zero-trust labels made executable** — SERAPHIM, BENGAL, OEKP and HITL are
+    typed `deterministic / no LLM` and startup refuses a card/class mismatch;
+    `BaseAgent` also refuses generic LLM paths for them. CSSSF's
+    `workspace.read`/`write` are chrooted to `sandbox/` in its per-agent tool
+    registry, including traversal and symlink checks.
+11. **Wave and taint hardening** — at most one mutating step per wave, enforced
+    in plan validation and again before dispatch. Taint and provenance flow
+    monotonically across every DAG hop, so a tainted connector result cannot be
+    laundered into a clean governed action or an untainted approval.
 
 ## The rules, non-negotiable
 
@@ -51,6 +68,8 @@ Each step below is complete unless marked **OPEN**.
   approval, corrupt file → refuse, never guess, never "best effort".
 - **AI is untrusted input.** Agent-to-agent messages are data, not
   instructions. Tool allowlist is the security boundary.
+- **One mutating step per wave.** Parallelism is for read-only work. Taint
+  never clears just because another agent summarized the data.
 - **Nothing ships without tests and docs.** No merge without an updated README
   or `SECURITY.md`. If a control changes, the docs say so.
 - **No secrets in config, chat or evidence.** File-based secrets, redaction in
@@ -65,7 +84,7 @@ Each step below is complete unless marked **OPEN**.
 
 ## What "done" looks like
 
-- `python -m pytest -q` → **186 passed**, no network.
+- `python -m pytest -q` → **206 passed, 1 symlink skip**, no network.
 - `git status` clean; local `HEAD` == `origin/main`; no unpushed hardening work.
 - `python -m agents doctor` reports Redis reachable, approvers configured,
   allowlist required.

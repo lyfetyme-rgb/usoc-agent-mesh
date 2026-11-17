@@ -1,0 +1,18 @@
+version: "3.9"
+services:
+  shad:
+    build: ../services/shad
+    ports: ["4001:4001"]
+    environment:
+      SHAD_PORT: "4001"
+      SHAD_DATA_DIR: "/data"
+    volumes: ["shad-data:/data"]
+  command-gateway:
+    build: ../services/command-gateway
+    ports: ["4002:4002"]
+    environment:
+      GATEWAY_PORT: "4002"
+      SHAD_URL: "http://shad:4001"
+    depends_on: [shad]
+volumes:
+  shad-data: {}

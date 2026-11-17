@@ -192,3 +192,11 @@ def test_idempotency_keys_are_scoped_by_agent_and_tenant():
     assert key_a
     assert key_a != SubsystemAgent._idempotency_key(worker_b, tenant_a, task)
     assert key_a != SubsystemAgent._idempotency_key(worker_a, tenant_b, task)
+
+    tainted = TaskSpec(
+        objective="charge the card",
+        idempotency_key="order-1",
+        provenance=["connector://vendor-api"],
+        tainted=True,
+    )
+    assert key_a != SubsystemAgent._idempotency_key(worker_a, tenant_a, tainted)

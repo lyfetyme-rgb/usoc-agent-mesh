@@ -9,15 +9,26 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 from .security import secure_dir
 
 Handler = Callable[..., Awaitable[Any] | Any]
+
+# Path-taking tools and the argument that carries the path. A scope is refused
+# for any other tool so a typo can never silently leave a side effect unconfined.
+PATH_ARGUMENTS = {
+    "workspace.read": "path",
+    "workspace.write": "path",
+    "workspace.list": "subdir",
+    "workspace.delete": "path",
+}
+_ABSOLUTE_PATH = re.compile(r"^(?:/|[A-Za-z]:)")
 
 
 class ToolError(RuntimeError):
@@ -78,6 +89,150 @@ def _safe(root: Path, relative: str) -> Path:
     if root.resolve() not in target.parents and target != root.resolve():
         raise ToolError(f"path escapes workspace: {relative}")
     return target
+
+
+def _normalize_scope(prefix: str) -> str:
+    """Return a canonical relative directory prefix such as ``sandbox``."""
+    scope = str(prefix).strip().replace("\\", "/").strip("/")
+    parts = scope.split("/") if scope else []
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ToolError(f"invalid tool scope: {prefix!r}")
+    if _ABSOLUTE_PATH.match(str(prefix).strip().replace("\\", "/")):
+        raise ToolError(f"tool scope must be relative: {prefix!r}")
+    return "/".join(parts)
+
+
+def _scoped_relative(
+    value: Any, *, scope: str, argument: str, allow_root: bool = False
+) -> str:
+    """Normalize a model-supplied path into a path inside ``scope``.
+
+    Both ``foo`` and ``sandbox/foo`` mean the same thing: the caller's view is
+    rooted at the sandbox. Anything that tries to climb out, use an absolute
+    path, or address the real workspace layout directly is rejected before the
+    base tool sees it.
+    """
+    raw = str(value).strip().replace("\\", "/")
+    if not raw or _ABSOLUTE_PATH.match(raw):
+        raise ToolError(f"{argument} must be a relative path inside {scope}/")
+    if raw in {".", scope, f"{scope}/"}:
+        if allow_root:
+            return "."
+        raise ToolError(f"{argument} must name a file inside {scope}/: {value!r}")
+
+    parts = raw.split("/")
+    if parts[0] == scope:
+        parts = parts[1:]
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ToolError(f"{argument} escapes {scope}/: {value!r}")
+    return "/".join(parts)
+
+
+def _scoped_target(
+    workspace_root: Path,
+    scope_root: Path,
+    scope: str,
+    value: Any,
+    *,
+    argument: str,
+    allow_root: bool = False,
+) -> str:
+    """Resolve a scoped path and hand the base tool a workspace-relative path."""
+    relative = _scoped_relative(
+        value, scope=scope, argument=argument, allow_root=allow_root
+    )
+    candidate = (scope_root / relative).resolve()
+    if candidate != scope_root and scope_root not in candidate.parents:
+        # Resolve after joining, so a symlink under sandbox/ that points into
+        # evidence/ or the live workspace is rejected here, not after the write.
+        raise ToolError(f"{argument} escapes {scope}/: {value!r}")
+    return str(candidate.relative_to(workspace_root))
+
+
+def scoped_tool_registry(
+    tools: ToolRegistry,
+    *,
+    workspace: Path,
+    scopes: Mapping[str, str],
+) -> ToolRegistry:
+    """Return a per-agent registry whose path arguments are chrooted.
+
+    This is enforcement at the tool-runtime boundary, not a prompt convention:
+    the agent receives a different ``ToolRegistry`` instance and its path
+    arguments are rewritten and re-validated before the base handler runs.
+    """
+    if not scopes:
+        return tools
+
+    normalized = {name: _normalize_scope(prefix) for name, prefix in scopes.items()}
+    for name in normalized:
+        if name not in tools.tools:
+            raise ToolError(f"cannot scope unknown tool: {name}")
+        if name not in PATH_ARGUMENTS:
+            raise ToolError(f"tool has no path argument to scope: {name}")
+
+    workspace_root = _workspace(workspace)
+    scoped = ToolRegistry()
+    for name, spec in tools.tools.items():
+        scope = normalized.get(name)
+        if scope is None:
+            scoped.register(spec)
+            continue
+
+        scope_root = (workspace_root / scope).resolve()
+        if scope_root != workspace_root and workspace_root not in scope_root.parents:
+            raise ToolError(f"tool scope escapes workspace: {scope}")
+
+        argument = PATH_ARGUMENTS[name]
+        base_handler = spec.handler
+        # workspace.list defaults to the workspace root in the base tool. A
+        # scoped agent must instead inherit its own scope root, or an omitted
+        # argument would silently widen the search.
+        list_default = scope if name == "workspace.list" else None
+
+        def make_handler(
+            handler: Handler,
+            *,
+            scope_label: str,
+            root: Path,
+            arg: str,
+            default: str | None,
+        ) -> Handler:
+            async def handler_with_scope(**kwargs: Any) -> Any:
+                if arg not in kwargs and default is None:
+                    raise ToolError(f"missing {arg} for scoped tool {scope_label}")
+                value_arg = kwargs.get(arg, default)
+                kwargs[arg] = _scoped_target(
+                    workspace_root,
+                    root,
+                    scope_label,
+                    value_arg,
+                    argument=arg,
+                    allow_root=default is not None,
+                )
+                value = handler(**kwargs)
+                if asyncio.iscoroutine(value):
+                    return await value
+                return value
+
+            return handler_with_scope
+
+        scoped.register(
+            ToolSpec(
+                name=spec.name,
+                description=f"{spec.description} Confined to {scope}/.",
+                input_schema=spec.input_schema,
+                handler=make_handler(
+                    base_handler,
+                    scope_label=scope,
+                    root=scope_root,
+                    arg=argument,
+                    default=list_default,
+                ),
+                timeout_s=spec.timeout_s,
+            )
+        )
+    return scoped
 
 
 def build_default_tools(

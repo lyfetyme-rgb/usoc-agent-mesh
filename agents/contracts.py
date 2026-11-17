@@ -146,6 +146,10 @@ class Handoff(Strict):
     kind: Literal["handoff"] = "handoff"
     instruction: str
     reason: Literal["auth", "approval", "judgement", "missing_info"] = "judgement"
+    # Structured reference to the approval a human must decide. The instruction
+    # stays human-readable; orchestration needs a machine-readable value to
+    # report a compensation that is waiting on a decision.
+    approval_ref: str | None = Field(default=None, max_length=100)
 
 
 Payload = Annotated[
@@ -316,6 +320,25 @@ class Message(Strict):
         )
 
 
+class Compensation(Strict):
+    """Declared undo for a step that changes something.
+
+    A compensation is dispatched through the *same* runtime governance gate as
+    the original work. It is never invented by the orchestrator: a step that
+    can change the world must say what reverses it, or the failure report says
+    so explicitly. No model output is trusted to define an undo path.
+    """
+
+    agent: str = Field(max_length=128)
+    objective: str = Field(min_length=1, max_length=8_000)
+    action_class: ActionClass = ActionClass.READ_ONLY
+    target: str | None = Field(default=None, max_length=300)
+    risk: RiskLevel = RiskLevel.LOW
+    # Optional pre-approved undo. Without it a compensation that needs a human
+    # is reported as HOLD instead of being silently skipped.
+    approval_ref: str | None = Field(default=None, max_length=100)
+
+
 class Step(BaseModel):
     """One unit of delegated work inside a plan."""
 
@@ -329,8 +352,14 @@ class Step(BaseModel):
     action_class: ActionClass = ActionClass.READ_ONLY
     target: str | None = None
     risk: RiskLevel = RiskLevel.LOW
+    # A governed step can carry the human decision that authorises it. Without
+    # this field an approved action could never be re-dispatched by the planner.
+    approval_ref: str | None = Field(default=None, max_length=100)
     provenance: list[str] = Field(default_factory=list)
     tainted: bool = False
+    # Only steps with side effects should declare one. Optional so existing
+    # plans and model output remain valid.
+    compensate: Compensation | None = None
 
 
 class Plan(BaseModel):
@@ -346,6 +375,12 @@ class GoalResult(BaseModel):
     answer: str
     correlation_id: str
     steps: list[dict[str, Any]] = Field(default_factory=list)
+    # Reverse-order undo attempts made when a wave failed. Each record carries
+    # status (done/hold/denied/failed), the owning step and governance refs.
+    compensations: list[dict[str, Any]] = Field(default_factory=list)
+    # Successful governed steps that declared no compensation. Failures must be
+    # honest about partial completion instead of implying a clean rollback.
+    uncompensated: list[str] = Field(default_factory=list)
     tokens_used: int = 0
     elapsed_ms: int = 0
 

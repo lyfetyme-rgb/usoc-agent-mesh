@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .contracts import ActionClass
 from .tools import ToolRegistry
@@ -48,6 +48,10 @@ class SubsystemSpec(BaseModel):
     keywords: list[str] = Field(default_factory=list, max_length=24)
     roles: list[str] = Field(default_factory=list, max_length=20)
     tools: list[str] = Field(default_factory=list)
+    # Tool-level confinement, applied when the mesh builds each agent's
+    # ToolRegistry. Example: {"workspace.write": "sandbox/"} makes every write
+    # path relative to workspace/sandbox, including symlink targets.
+    tool_scopes: dict[str, str] = Field(default_factory=dict)
     subscribes: list[str] = Field(default_factory=list)
     # Least-privilege authorization matrix. None means "unrestricted" (backward
     # compatible with existing capability cards). A non-None list restricts the
@@ -57,7 +61,21 @@ class SubsystemSpec(BaseModel):
     allowed_action_classes: list[ActionClass] | None = None
     allowed_targets: list[str] | None = None
     system_prompt: str = Field(default="", max_length=8_000)
-    model_tier: Literal["fast", "strong"] = "fast"
+    model_tier: Literal["fast", "strong", "deterministic"] = "fast"
+
+    @model_validator(mode="after")
+    def _validate_tool_scopes(self) -> "SubsystemSpec":
+        """Fail closed on malformed scopes instead of silently ignoring them."""
+        for tool, prefix in self.tool_scopes.items():
+            if tool not in self.tools:
+                raise ValueError(f"tool scope names undeclared tool: {tool}")
+            normalized = str(prefix).strip().replace("\\", "/").strip("/")
+            parts = normalized.split("/") if normalized else []
+            if not parts or any(part in {"", ".", ".."} for part in parts):
+                raise ValueError(f"invalid tool scope for {tool}: {prefix!r}")
+            if re.match(r"^(?:[A-Za-z]:|/)", str(prefix).strip().replace("\\", "/")):
+                raise ValueError(f"tool scope must be relative for {tool}: {prefix!r}")
+        return self
 
     def card(self) -> str:
         caps = "; ".join(self.capabilities)

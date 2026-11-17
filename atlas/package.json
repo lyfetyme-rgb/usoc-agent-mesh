@@ -1,0 +1,19 @@
+{
+  "name": "atlas-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Atlas cyber-physical AI platform with BENGAL SHAD cross-cutting assurance layer",
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "apps/*",
+    "edge/*"
+  ],
+  "scripts": {
+    "dev:shad": "npm run dev --workspace services/shad",
+    "dev:gateway": "npm run dev --workspace services/command-gateway",
+    "dev:console": "npm run dev --workspace apps/shad-console",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  }
+}

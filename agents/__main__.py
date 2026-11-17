@@ -100,10 +100,23 @@ def cmd_list(args: argparse.Namespace) -> int:
     for spec in registry.subsystems:
         tools = ", ".join(spec.tools) or "-"
         subs = ", ".join(spec.subscribes) or "-"
-        print(f"{spec.id:<{width}}  {spec.name}  [{spec.model_tier}]  {len(spec.roles)} roles")
+        tier = (
+            "deterministic / no LLM"
+            if spec.model_tier == "deterministic"
+            else spec.model_tier
+        )
+        scopes = (
+            ", ".join(
+                f"{name} -> {prefix.strip().rstrip('/')}/"
+                for name, prefix in spec.tool_scopes.items()
+            )
+            or "-"
+        )
+        print(f"{spec.id:<{width}}  {spec.name}  [{tier}]  {len(spec.roles)} roles")
         print(f"{'':<{width}}  {spec.description}")
         print(f"{'':<{width}}  roles: {spec.role_titles()}")
-        print(f"{'':<{width}}  tools: {tools}   listens: {subs}\n")
+        print(f"{'':<{width}}  tools: {tools}   listens: {subs}")
+        print(f"{'':<{width}}  tool scope: {scopes}\n")
     return 0
 
 
@@ -407,6 +420,12 @@ async def _run_demo(args: argparse.Namespace) -> int:
     goal = args.goal or DEFAULT_GOAL
     async with Mesh(settings) as mesh:
         assert mesh.registry is not None
+        if mesh.evidence is not None:
+            chain_ok, detail = mesh.evidence.verify()
+            if not chain_ok:
+                print(f"evidence chain in this workspace is not verifiable: {detail}")
+                print("use a fresh --workspace or set AGENT_SHARED_SECRET to the key that signed it")
+                return 1
         print(
             f"agents: {len(mesh.agents)}  roles: {mesh.registry.roles_total}  "
             f"model: {getattr(mesh.llm, 'model', '?')}  bus: {type(mesh.bus).__name__}"

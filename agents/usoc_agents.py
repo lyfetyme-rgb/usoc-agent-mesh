@@ -69,6 +69,8 @@ class AiceeAgent(SubsystemAgent):
 class SeraphimAgent(SubsystemAgent):
     """Binding policy decisions come from code, never from the model."""
 
+    deterministic = True
+
     async def handle_task(self, spec: TaskSpec, msg: Message) -> TaskResult | Handoff | Failure:
         if self.policy is None:
             return Failure(code="policy_unavailable", message="policy engine not configured")
@@ -104,6 +106,8 @@ class SeraphimAgent(SubsystemAgent):
 
 class HitlAgent(SubsystemAgent):
     """Presents decisions and records approvals. It can never approve for a human."""
+
+    deterministic = True
 
     async def handle_task(self, spec: TaskSpec, msg: Message) -> TaskResult | Handoff | Failure:
         if self.approvals is None:
@@ -146,6 +150,7 @@ class HitlAgent(SubsystemAgent):
                 f"Approval id {request.id}. Approve with: python -m agents approve {request.id}"
             ),
             reason="approval",
+            approval_ref=request.id,
         )
 
     async def handle_query(self, query: Query, msg: Message) -> QueryReply:
@@ -155,11 +160,20 @@ class HitlAgent(SubsystemAgent):
             pending = await self.approvals.pending()
             listing = "\n".join(f"- {r.id} {r.action_class.value} {r.target} ({r.requested_by})" for r in pending)
             return QueryReply(answer=f"{len(pending)} pending approvals\n{listing}".strip())
-        return await super().handle_query(query, msg)
+        # Never fall back to the generic LLM query path. HITL is deterministic:
+        # either it can answer from the approval store or it says what it needs.
+        return QueryReply(
+            answer=(
+                "HITL is deterministic (no LLM). Ask for 'pending approvals' or "
+                "submit an approval request task with an action_class and target."
+            )
+        )
 
 
 class OekpAgent(SubsystemAgent):
     """Append-only evidence writer. Original records are never modified."""
+
+    deterministic = True
 
     async def handle_task(self, spec: TaskSpec, msg: Message) -> TaskResult | Handoff | Failure:
         if self.evidence is None:
@@ -185,6 +199,8 @@ class OekpAgent(SubsystemAgent):
 
 class BengalAgent(SubsystemAgent):
     """Independent verification: recomputes the evidence chain from disk."""
+
+    deterministic = True
 
     async def handle_task(self, spec: TaskSpec, msg: Message) -> TaskResult | Handoff | Failure:
         if self.evidence is None:

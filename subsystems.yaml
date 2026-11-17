@@ -52,7 +52,9 @@ subsystems:
       - Model Evaluation Agent
       - Intelligence Coordination Agent
     tools: [workspace.read, workspace.list]
-    allowed_senders: [orchestrator]
+    allowed_recipients: [acie, cohesion, seraphim, oekp]
+    allowed_senders: [orchestrator, cohesion, bengal, hitl]
+    allowed_action_classes: [read_only, recommend]
     model_tier: strong
     system_prompt: |
       You are AICEE, USOC's operational intelligence engine. Quantify before you
@@ -98,7 +100,9 @@ subsystems:
       - Connectivity Recovery Agent
       - Edge Integrity Verification Agent
     tools: []
-    allowed_senders: [orchestrator]
+    allowed_recipients: []
+    allowed_senders: [orchestrator, aicee, cohesion, csssf]
+    allowed_action_classes: [read_only]
     model_tier: fast
     system_prompt: |
       You are ACIE, the edge and communication intelligence subsystem. Report what
@@ -146,8 +150,10 @@ subsystems:
       - Enforcement Authorization Agent
       - Policy Audit Agent
     tools: []
-    allowed_senders: [orchestrator]
-    model_tier: fast
+    allowed_recipients: [oekp]
+    allowed_senders: [orchestrator, aicee, cohesion, csssf, cyber_defense, hitl]
+    allowed_action_classes: [read_only]
+    model_tier: deterministic
     system_prompt: |
       You are SERAPHIM, USOC's policy decision point. You evaluate, you do not
       negotiate. Binding decisions come from the deterministic policy engine:
@@ -190,7 +196,9 @@ subsystems:
       - Mission Readiness Agent
       - Mission Reporting Agent
     tools: []
-    allowed_senders: [orchestrator]
+    allowed_recipients: [aicee, acie, seraphim, oekp]
+    allowed_senders: [orchestrator, aicee, hitl, bengal]
+    allowed_action_classes: [read_only, recommend]
     model_tier: strong
     system_prompt: |
       You are COHESION, the mission-intent and coordination subsystem. Restate the
@@ -232,8 +240,10 @@ subsystems:
       - Reliability Engineering Agent
       - Assurance Reporting Agent
     tools: [evidence.verify, evidence.read, workspace.read]
-    allowed_senders: [orchestrator]
-    model_tier: strong
+    allowed_recipients: [oekp, aicee]
+    allowed_senders: [orchestrator, hitl]
+    allowed_action_classes: [read_only]
+    model_tier: deterministic
     system_prompt: |
       You are BENGAL, the independent assurance subsystem. Verify against evidence,
       not against assertions. Report failed checks and missing evidence plainly;
@@ -276,7 +286,15 @@ subsystems:
       - Sandbox Isolation Verification Agent
       - Simulation Results Agent
     tools: [workspace.read, workspace.write]
-    allowed_senders: [orchestrator]
+    # Hard tool boundary: every path is relative to workspace/sandbox at the
+    # ToolRegistry layer. Prompt text is not the enforcement point.
+    tool_scopes:
+      workspace.read: sandbox/
+      workspace.write: sandbox/
+    allowed_recipients: [acie, oekp]
+    allowed_senders: [orchestrator, cohesion, cyber_defense]
+    allowed_action_classes: [read_only, simulate, execute]
+    allowed_targets: ["sandbox/*"]
     model_tier: fast
     system_prompt: |
       You are CSSSF, the controlled simulation subsystem. Every experiment states
@@ -317,8 +335,10 @@ subsystems:
       - Retention and Classification Agent
       - Evidence Retrieval Agent
     tools: [evidence.append, evidence.verify, evidence.read, workspace.write]
-    allowed_senders: [orchestrator]
-    model_tier: fast
+    allowed_recipients: []
+    allowed_senders: [orchestrator, aicee, seraphim, cohesion, bengal, csssf, cyber_defense, hitl]
+    allowed_action_classes: [read_only]
+    model_tier: deterministic
     system_prompt: |
       You are OEKP, USOC's evidence and provenance subsystem. Append, never
       overwrite. Distinguish original records from later interpretation, preserve
@@ -365,7 +385,10 @@ subsystems:
       - Security Validation Agent
       - Incident Recovery Agent
     tools: []
-    allowed_senders: [orchestrator]
+    allowed_recipients: [seraphim, hitl, oekp, csssf]
+    allowed_senders: [orchestrator, cohesion, aicee]
+    allowed_action_classes: [read_only, recommend, contain]
+    allowed_targets: ["sandbox/*", "staging/*"]
     subscribes: [topic.alert]
     model_tier: fast
     system_prompt: |
@@ -412,9 +435,11 @@ subsystems:
       - Decision Accountability Agent
       - Operational Oversight Agent
     tools: []
-    allowed_senders: [orchestrator]
+    allowed_recipients: [seraphim, oekp]
+    allowed_senders: [orchestrator, cyber_defense, cohesion, bengal]
+    allowed_action_classes: [read_only]
     subscribes: [topic.alert]
-    model_tier: fast
+    model_tier: deterministic
     system_prompt: |
       You are HITL, the human governance interface. Prepare and explain decisions;
       only an authenticated human may approve them. Never claim approval that has

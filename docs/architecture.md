@@ -62,13 +62,13 @@ agents; the planner selects the subset a goal needs.
 | 2 Intelligence | AICEE | implemented as coordinator |
 | 3 Mission interpretation | COHESION | implemented as coordinator |
 | 4 Security analysis | CYBER DEFENSE | implemented, defensive-only screen |
-| 5 Risk and policy evaluation | SERAPHIM + PolicyEngine | deterministic, implemented |
-| 6 Simulation | CSSSF | implemented as coordinator |
-| 7 Independent assurance | BENGAL | deterministic evidence verification |
-| 8 Human authorization | HITL + ApprovalStore | implemented, file-backed |
+| 5 Risk and policy evaluation | SERAPHIM + PolicyEngine | deterministic / no LLM, implemented |
+| 6 Simulation | CSSSF | LLM-backed coordinator, sandboxed tool scope |
+| 7 Independent assurance | BENGAL | deterministic / no LLM evidence verification |
+| 8 Human authorization | HITL + ApprovalStore | deterministic / no LLM, file-backed |
 | 9 Controlled execution | runtime + target allowlist | implemented, bounded |
 | 10 Independent validation | BENGAL | evidence chain verification |
-| 11 Evidence preservation | OEKP + EvidenceChain | append-only, hash-chained |
+| 11 Evidence preservation | OEKP + EvidenceChain | deterministic / no LLM, append-only, hash-chained |
 | 12 Controlled improvement | AICEE | proposal-only path |
 
 The demo goal exercises steps 1, 2, 5 and 11. The governance tests exercise
@@ -272,7 +272,7 @@ and it means every side effect needs a key.
 
 | situation | behaviour |
 |---|---|
-| handler raises `RetryableError` | `nack(requeue=True)`, new attempt, same correlation |
+| handler raises `RetryableError` | bounded exponential backoff, then `nack(requeue=True)`, new attempt, same correlation |
 | attempts exhausted | `Failure` to caller + dead-letter entry |
 | handler exceeds `task_timeout_s` | cancelled, `Failure(code=timeout)` |
 | message deadline already past | refused with `Failure(code=deadline)`, no model call |
@@ -283,7 +283,9 @@ and it means every side effect needs a key.
 | hop > 8 | contract rejects the message at construction |
 | payload > 256 KiB | contract rejects before it reaches the broker |
 | plan names an unknown agent | plan rejected before any step runs |
-| independent step fails | wave aborts, completed results are returned with the error |
+| independent step fails | wave aborts; every step that ran is reported; declared undos run in reverse through policy/HITL; undeclared successes are listed as `uncompensated`; `goal.failed` event published |
+| two governed steps would share a wave | plan rejected before dispatch; a second mutating step must depend on an earlier one |
+| upstream step is tainted | taint and full provenance flow to every dependent step; governed work needs an approval that discloses the same chain |
 
 Idempotency keys must be stable across retries. The orchestrator derives them
 from `trace | goal | step | objective`; domain code should derive them from the
@@ -297,7 +299,15 @@ then validates the result:
 * every `agent` exists in the registry
 * step ids are unique
 * `depends_on` only references earlier steps (this also rules out cycles)
-* a governed step (`execute`/`contain`) declares a target
+* a governed step (`execute`/`contain`) declares a target, may carry a human
+  `approval_ref`, and should declare a structured `compensate` (undo) — the
+  orchestrator never invents one
+* at most one governed step per topological wave; a second mutating step must
+  declare an explicit dependency so the wave cannot split state
+* compensation is dispatched as an ordinary task, so it inherits the policy
+  gate, approval scope, provenance and evidence chain
+* taint is monotone across dependencies, so downstream governed work always
+  sees the original untrusted provenance
 
 Failure is not fatal: `Mesh` uses `RouterPlanner` when no model is configured.
 It splits the goal on clause boundaries, scores each clause against capability
@@ -325,12 +335,19 @@ candidates, so a wrong assignment is a one-line investigation.
 
 ## 8. Concurrency, cost and latency
 
-* Independent steps in a wave run concurrently (`asyncio.gather`).
+* Independent **non-mutating** steps in a wave run concurrently (`asyncio.gather`);
+  governed steps are serialized by plan validation and a runtime pre-dispatch check.
 * Each agent caps in-flight work with a semaphore (`max_concurrency`), so a
   burst queues at the mailbox instead of spawning unbounded tasks.
 * Each step carries a token budget; overruns are flagged in the result.
-* `model_tier: fast` sends light coordinators to the cheap model; `strong` is
-  reserved for analysis, coordination and assurance.
+* `model_tier: fast` sends light LLM-backed coordinators to the cheap model;
+  `strong` is reserved for LLM-backed analysis and coordination.
+* `model_tier: deterministic` means no LLM at all. SERAPHIM, BENGAL, OEKP and
+  HITL must map to deterministic classes at startup; `BaseAgent` refuses generic
+  task/query/tool paths for them, so the label is a runtime contract.
+* CSSSF's `tool_scopes` gives its LLM a separate `ToolRegistry` rooted at
+  `workspace/sandbox/`. Paths, traversal and symlink targets are resolved before
+  the base tool runs, so rehearsal output cannot overwrite live workspace files.
 * Agents send only the objective, declared inputs and prior results — not the
   whole conversation. Context grows with the DAG, not with the transcript.
 * `EchoLLM` makes the entire test suite run in seconds with no network.
@@ -343,7 +360,8 @@ candidates, so a wrong assignment is a one-line investigation.
   `trace`, `agent`, `event`, plus bounded fields.
 * Metrics: `task.received/completed/failed/retried/timeout/idempotent_hit`,
   `policy.hold`, `policy.denied`, `policy.evaluated`, `evidence.appended`,
-  `bengal.verified`, `tool.called`, `goal.completed/failed`.
+  `bengal.verified`, `tool.called`, `goal.completed/failed`,
+  `compensation.done/hold/denied/failed`.
 * `python -m agents health` reports agent uptime, inflight work, transport
   counters, pending approvals and diagnostics.
 * Orchestrator events (`plan.created`, `goal.completed`) give a low-cost audit
@@ -466,7 +484,9 @@ The suite covers the invariants that break multi-agent systems:
 * idempotency (handler runs once, same result twice)
 * tool allowlist enforcement
 * routing correctness for all nine cards
-* plan validation (unknown agent, forward dependency, duplicate id)
+* plan validation (unknown agent, forward dependency, duplicate id, at most one
+  mutating step per wave)
+* wave isolation and monotone taint propagation across downstream governed steps
 * end-to-end mesh run, unplannable goal, parallel wave timing, prior-result
   propagation
 * policy matrix: ALLOW, HOLD, DENY, target allowlist, restricted data
@@ -497,7 +517,7 @@ governance to land before higher-risk autonomy.
 | C — Communication architecture | `contracts.py`, `bus.py`, this document | Protobuf/gRPC, authenticated service identity |
 | D — Implementation blueprint | package layout and composition root | service boundaries for role workers |
 | E — Security and governance | `governance.py`, `evidence.py`, `security.py`, `usoc_agents.py` | OPA/Rego, per-agent keys, signed authorization artifacts |
-| F — Test and verification | 186 tests across contracts, bus, runtime, routing, governance, security | integration, performance, fault-injection suites |
+| F — Test and verification | 206 passed + 1 symlink skip across contracts, bus, runtime, routing, governance, security, wave recovery, zero-trust tiers | integration, performance, fault-injection suites |
 | G — Phased roadmap | phases below | resource and delivery schedule |
 | H — Operational readiness | `health` and diagnostics | evidence-backed maturity assessment per subsystem |
 

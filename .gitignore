@@ -20,6 +20,10 @@ workspace-frag/
 # Docker volumes / data
 data/
 
+# JS dependencies and runtime logs
+node_modules/
+*.log
+
 # Separate project
 h-lift/
 

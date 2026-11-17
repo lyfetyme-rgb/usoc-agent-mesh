@@ -61,7 +61,7 @@ from .governance import (
     PolicyEngine,
 )
 from .llm import EchoLLM, LLM, OpenAICompatibleLLM, build_llm
-from .mesh import Mesh
+from .mesh import Mesh, validate_agent_tiers
 from .orchestrator import LLMPlanner, Orchestrator, PlanError, RouterPlanner, validate_plan
 from .registry import Registry, RegistryError, SubsystemSpec, load_registry
 from .runtime import AgentError, BaseAgent, RetryableError, SubsystemAgent
@@ -69,7 +69,13 @@ from .security import SecurityError, Signer, build_signer, configured_approvers,
 from .service import HealthServer
 from .shell import Shell
 from .store import InMemoryStore, RedisStore, StateStore
-from .tools import ToolError, ToolRegistry, ToolSpec, build_default_tools
+from .tools import (
+    ToolError,
+    ToolRegistry,
+    ToolSpec,
+    build_default_tools,
+    scoped_tool_registry,
+)
 from .usoc_agents import AiceeAgent, BengalAgent, HitlAgent, OekpAgent, SeraphimAgent
 
 __version__ = "0.1.0"
@@ -165,5 +171,7 @@ __all__ = [
     "load_connectors",
     "load_registry",
     "redact_url",
+    "scoped_tool_registry",
+    "validate_agent_tiers",
     "validate_plan",
 ]

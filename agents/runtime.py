@@ -53,6 +53,9 @@ from .store import StateStore
 from .tools import ToolRegistry, ToolError
 
 
+NO_LLM_CODE = "deterministic_no_llm"
+
+
 class AgentError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -128,6 +131,9 @@ class BaseAgent:
     """Mailbox + policy. Subclasses override ``handle_task``/``handle_query``."""
 
     max_tool_rounds = 2
+    # Subclasses with only deterministic handlers set this True. The card's
+    # model_tier must agree; Mesh validates the pair at startup.
+    deterministic = False
 
     def __init__(
         self,
@@ -163,6 +169,18 @@ class BaseAgent:
         self._loop_task: asyncio.Task | None = None
         self._stopping = asyncio.Event()
         self._started_at = 0.0
+
+    @property
+    def no_llm(self) -> bool:
+        """The capability card is authoritative: deterministic never calls a model."""
+        return self.spec.model_tier == "deterministic"
+
+    def _no_llm_failure(self) -> Failure:
+        self.metrics.inc("llm.blocked")
+        return Failure(
+            code=NO_LLM_CODE,
+            message=f"{self.id} is deterministic (no LLM); use its deterministic handler",
+        )
 
     # -- lifecycle ----------------------------------------------------------
     async def start(self) -> None:
@@ -281,6 +299,7 @@ class BaseAgent:
                                 f"Approve with: python -m agents approve {decision.approval_ref}"
                             ),
                             reason="approval",
+                            approval_ref=decision.approval_ref,
                         )
                     )
                 )
@@ -313,8 +332,16 @@ class BaseAgent:
             return
         except RetryableError as exc:
             if msg.attempt + 1 < self.settings.max_attempts:
+                # Bounded exponential backoff. Without it a broken provider turns
+                # the retry budget into a tight loop against the broker.
+                delay = min(
+                    self.settings.retry_backoff_base_s * (2**msg.attempt),
+                    self.settings.retry_backoff_max_s,
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
                 self.metrics.inc("task.retried")
-                log("task.retry", reason=str(exc), attempt=msg.attempt + 1)
+                log("task.retry", reason=str(exc), attempt=msg.attempt + 1, backoff_s=delay)
                 await self.bus.nack(self.id, msg, requeue=True)
             else:
                 self.metrics.inc("task.failed")
@@ -498,6 +525,10 @@ class BaseAgent:
                 spec.objective,
                 spec.tenant_id or msg.tenant_id or "",
                 spec.mission_id or msg.mission_id or "",
+                # A clean cached result must never be replayed for a tainted
+                # re-dispatch of the same objective and target.
+                "1" if spec.tainted else "0",
+                "|".join(sorted(set(spec.provenance))),
             ]
         )
         digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
@@ -506,6 +537,8 @@ class BaseAgent:
     # -- domain hooks -------------------------------------------------------
     async def handle_task(self, spec: TaskSpec, msg: Message) -> TaskResult | Handoff | Failure:
         """Default implementation: one bounded LLM call with optional tool rounds."""
+        if self.no_llm:
+            return self._no_llm_failure()
         system = TASK_SYSTEM.format(
             name=self.spec.name,
             count=len(self.known_agents) or 9,
@@ -553,6 +586,8 @@ class BaseAgent:
         return TaskResult(ok=False, error="no outcome produced", tokens_used=tokens)
 
     async def _run_tool(self, call: dict[str, Any]) -> dict[str, Any]:
+        if self.no_llm:
+            return {"tool": str(call.get("tool_name")), "error": "deterministic agents cannot call tools"}
         name = str(call.get("tool_name"))
         if name not in self.spec.tools:
             return {"tool": name, "error": "not permitted for this subsystem"}
@@ -585,6 +620,9 @@ class BaseAgent:
         return result
 
     async def handle_query(self, query: Query, msg: Message) -> QueryReply:
+        if self.no_llm:
+            refusal = self._no_llm_failure()
+            return QueryReply(answer=refusal.message, data={"code": refusal.code})
         system = QUERY_SYSTEM.format(name=self.spec.name)
         user = json.dumps({"question": query.question, "context": query.context}, default=str)
         try:

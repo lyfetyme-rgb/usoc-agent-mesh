@@ -302,6 +302,83 @@ Generate the values with `python -m agents integrity` (HMAC) or
 `AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true` in production so a missing pin fails
 closed instead of trusting the file on disk.
 
+### Capability-card authorization matrix
+
+The pins above protect the bytes; the fields inside the cards decide privileges.
+Every shipped card declares `allowed_recipients`, `allowed_senders`,
+`allowed_action_classes` and `allowed_targets`; `None` means unrestricted and is
+not used in the shipped file. `acls_from_specs` turns recipients and
+`subscribes` into exact topic rules, while `BaseAgent._require_delegation_allowed`
+and `_authorize` enforce the matrix at dispatch time. The shipped cards are
+mutually consistent: if A may delegate to B, B must name A in
+`allowed_senders`, and a test fails the build if that invariant breaks.
+
+Only CSSSF (`execute`, `sandbox/*`) and CYBER DEFENSE (`contain`, `sandbox/*`
+and `staging/*`) can accept governed actions. Every other coordinator is
+limited to read-only or recommend work. Treat a new card as an IAM policy, not
+as documentation: widening `allowed_recipients` or `allowed_action_classes` is
+a privilege change and needs a signature refresh.
+
+### Deterministic tiers are implementation facts
+
+`model_tier: deterministic` is not a cost label. It asserts that the subsystem
+has no LLM path at all. `Mesh.start` checks that each deterministic card maps to
+a Python class declaring `deterministic = True` (and the reverse), so a card
+cannot quietly claim determinism while using the generic handler. At runtime,
+`BaseAgent.handle_task`, `handle_query`, `_run_tool` and the model-selection path
+refuse deterministic specs before any provider call. SERAPHIM, BENGAL, OEKP and
+HITL are shipped this way; no model, even an offline echo model, is in the loop.
+
+### CSSSF tool confinement
+
+CSSSF remains an LLM-backed coordinator, but its capability card declares
+`tool_scopes` for `workspace.read` and `workspace.write` as `sandbox/`. The mesh
+builds CSSSF a separate `ToolRegistry` whose path arguments are normalized and
+anchored at `workspace/sandbox/`:
+
+* `foo` and `sandbox/foo` both resolve under the sandbox, so prompts do not need
+  to know the real workspace layout.
+* Absolute paths and `..` are rejected before the base handler runs. A path
+  such as `evidence/chain.jsonl` is interpreted as
+  `sandbox/evidence/chain.jsonl`; it can never address the live prefix.
+* The final path is resolved after joining, so a symlink under `sandbox/` that
+  points to a live artifact is rejected as an escape.
+* `workspace.list` defaults to the sandbox root instead of the workspace root;
+  an omitted argument cannot widen the search.
+
+Other agents keep the unscoped registry. This is deliberately enforced in the
+tool runtime, not by system-prompt wording or by the policy target allowlist: a
+successful sandbox rehearsal cannot overwrite the evidence and telemetry that
+BENGAL and OEKP later read.
+
+### Mutating steps are serialized
+
+`asyncio.gather(..., return_exceptions=True)` deliberately lets a whole wave run
+to completion. That is good for honest failure reporting but dangerous for
+side effects: if two governed steps shared a wave, one could commit while the
+other failed, leaving split state before the fail-fast boundary. `validate_plan`
+therefore computes each step's topological layer and rejects a plan with more
+than one `execute`/`contain` step in a layer. `Orchestrator._execute` repeats the
+check before dispatch so an injected or post-plan mutation cannot reintroduce
+the hazard. A second mutating step must name an earlier step in `depends_on`;
+read-only siblings still run concurrently.
+
+### Compensation is governed work
+
+An undo is never inferred from model prose. A governed step must declare a
+structured `compensate` with its own agent, objective, action class, target and
+optional human approval. On a wave failure the orchestrator walks successful
+governed steps in reverse and dispatches each declared undo as an ordinary task,
+so it passes through the same sender check, policy decision point, approval
+store, provenance tracking and evidence chain as the original action.
+
+A compensation that needs a human returns `HOLD` with the new approval id; it
+is reported as pending, never silently skipped or self-approved. A compensation
+that policy refuses is `denied` without a model call. Successful governed steps
+with no declared undo are listed in `GoalResult.uncompensated`, so a partial
+wave is never presented as a clean rollback. `goal.failed` and `goal.compensated`
+events make the outcome observable to audit consumers.
+
 ### SHELL infrastructure boundary
 
 The seven SHELL roles are platform infrastructure, not domain agents. Because
@@ -329,21 +406,17 @@ evidence chain. This prevents poisoned ACIE telemetry -> AICEE recommendation ->
 COHESION plan from becoming an executable action without a human seeing the
 tainted chain.
 
-### Capability scoping (least privilege)
-
-Each subsystem declares an authorization matrix in `subsystems.yaml`:
-
-* `allowed_recipients` — agents it may delegate to (`None` = any known agent).
-* `allowed_senders` — agents that may task it (`None` = any sender).
-* `allowed_action_classes` — action classes it may propose (`None` = any).
-* `allowed_targets` — target patterns it may act on (`None` = any).
-
-These are enforced at runtime in `BaseAgent` (`_require_delegation_allowed`,
-`_require_recipient_allowed`, `_on_task`, `_authorize`) and fail closed: an
-undeclared recipient, action class or target raises `AgentError` / returns a
-policy DENY before any work runs. With no matrix declared (the default for
-existing cards) behaviour is unchanged, so scoping is opt-in and backward
-compatible.
+Propagation is monotone, not best-effort. `Orchestrator._run_step` unions the
+provenance and taint of every dependency into the downstream `TaskSpec`, and
+`BaseAgent` copies that context onto the returned `TaskResult` even when a
+handler emits a default-clean result. An intermediary cannot launder poisoned
+input by re-delegating under a different agent identity: the governed task
+still carries the original connector provenance and `tainted=True`. A clean
+approval is rejected with a `taint disclosure` denial; only a fresh approval
+issued for the same tainted chain can authorize the action. Failed results and
+step records carry the same metadata so compensation and audit stay honest.
+Idempotency keys are also scoped by taint and provenance, so a clean cache entry
+cannot be replayed for a tainted re-dispatch of the same objective.
 
 ### Topic ACLs and wildcards
 
