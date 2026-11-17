@@ -278,6 +278,18 @@ class BaseAgent:
             self.metrics.inc("task.sender_denied")
             await self._reject(msg, "sender_not_permitted", f"sender {msg.sender!r} is not permitted to task {self.id}")
             return
+        # -- replay guard: a redelivery that already completed must not spend
+        # the approval nonce a second time. The cache only holds results whose
+        # first delivery passed the governance gate below.
+        key = self._idempotency_key(msg, spec)
+        if key:
+            cached = await self.store.get(key)
+            if cached is not None:
+                self.metrics.inc("task.idempotent_hit")
+                await self.bus.ack(self.id, msg)
+                await self._publish(msg.reply_with(TaskResult.model_validate(cached)))
+                return
+
         # -- governance gate: no consequential action without a policy ALLOW --
         decision: GovernanceDecision | None = None
         try:
@@ -287,11 +299,13 @@ class BaseAgent:
             await self._reject(msg, "policy_error", f"policy evaluation failed: {exc}")
             return
         if decision is not None:
-            await self._audit("policy.decision", msg, decision.model_dump(mode="json"))
+            await self._audit(
+                "policy.decision", msg, decision.model_dump(mode="json"), spec
+            )
             if decision.decision is DecisionType.HOLD:
                 self.metrics.inc("policy.hold")
                 await self.bus.ack(self.id, msg)
-                await self.bus.publish(
+                await self._publish(
                     msg.reply_with(
                         Handoff(
                             instruction=(
@@ -308,15 +322,6 @@ class BaseAgent:
             if decision.decision is DecisionType.DENY:
                 self.metrics.inc("policy.denied")
                 await self._reject(msg, "policy_denied", "; ".join(decision.reasons))
-                return
-
-        key = self._idempotency_key(msg, spec)
-        if key:
-            cached = await self.store.get(key)
-            if cached is not None:
-                self.metrics.inc("task.idempotent_hit")
-                await self.bus.ack(self.id, msg)
-                await self.bus.publish(msg.reply_with(TaskResult.model_validate(cached)))
                 return
 
         started = time.perf_counter()
@@ -357,7 +362,7 @@ class BaseAgent:
         if not isinstance(result, TaskResult):
             # A subsystem may answer with Handoff (needs a human) or Failure.
             self.metrics.inc("task.handoff" if isinstance(result, Handoff) else "task.failed")
-            await self.bus.publish(msg.reply_with(result))
+            await self._publish(msg.reply_with(result))
             return
 
         # Carry provenance through the mesh: this result names its producer and
@@ -382,6 +387,7 @@ class BaseAgent:
                     "provenance": decision.provenance,
                     "tainted": decision.tainted,
                 },
+                spec,
             )
             result = result.model_copy(
                 update={
@@ -400,7 +406,26 @@ class BaseAgent:
             ms=int((time.perf_counter() - started) * 1000),
             tokens=result.tokens_used,
         )
-        await self.bus.publish(msg.reply_with(result))
+        await self._publish(msg.reply_with(result))
+
+    async def _publish(self, msg: Message) -> None:
+        """Runtime-side topic ACL check before the transport sees a message.
+
+        The bus repeats this check *after* signing so it can bind the trusted
+        ``signing_kid``. Here we fail early on a foreign sender if a restricted
+        topic rule is configured; a worker cannot escape it by calling the bus
+        directly because the bus enforces the same map on publish and receive.
+        """
+        rules = getattr(self.bus, "topic_rules", None)
+        if rules:
+            from .bus import topic_rule_denial
+
+            detail = topic_rule_denial(msg, rules, check_kid=False)
+            if detail:
+                self.metrics.inc("topic.acl_denied")
+                log("topic.acl_denied", sender=msg.sender, topic=msg.topic, reason=detail)
+                raise PermissionError(detail)
+        await self.bus.publish(msg)
 
     async def _authorize(self, msg: Message, spec: TaskSpec) -> GovernanceDecision | None:
         """Return a decision for consequential work, None for ordinary work."""
@@ -422,16 +447,19 @@ class BaseAgent:
                     policy_ref="pol-scope",
                     reasons=[f"target {spec.target!r} not permitted for {self.id}"],
                 )
+        # Tainted work is consequential even when its action class is not:
+        # poisoned connector telemetry can seed a later mutating step.
+        requires_policy = spec.action_class in GOVERNED_ACTIONS or spec.tainted
         if self.policy is None:
-            # Fail closed: a missing policy engine must never let governed work
-            # through. Only read-only/recommend/simulate work is unaffected.
-            if spec.action_class in GOVERNED_ACTIONS:
+            # Fail closed: a missing policy engine must never let governed or
+            # tainted work through. Only clean non-governed work is unaffected.
+            if requires_policy:
                 self.metrics.inc("policy.denied")
                 return GovernanceDecision(
                     decision=DecisionType.DENY,
                     policy_ref="pol-unavailable",
                     reasons=[
-                        "policy engine is not configured; governed actions are refused"
+                        "policy engine is not configured; governed and tainted actions are refused"
                     ],
                 )
             return None
@@ -445,7 +473,7 @@ class BaseAgent:
                 policy_ref=self.policy.policy_ref(spec.action_class, spec.target, spec.risk),
                 reasons=[f"defensive-only boundary: prohibited intent ({', '.join(violations)})"],
             )
-        if spec.action_class not in GOVERNED_ACTIONS:
+        if not requires_policy:
             return None
         try:
             return await asyncio.wait_for(
@@ -461,6 +489,8 @@ class BaseAgent:
             correlation_id=msg.correlation_id,
             provenance=spec.provenance,
             tainted=spec.tainted,
+            amount=spec.amount,
+            currency=spec.currency,
         ),
         timeout=5.0,
     )
@@ -472,9 +502,21 @@ class BaseAgent:
                 reasons=["policy evaluation timed out"],
             )
 
-    async def _audit(self, kind: str, msg: Message, data: dict[str, Any]) -> str | None:
+    async def _audit(
+        self,
+        kind: str,
+        msg: Message,
+        data: dict[str, Any],
+        spec: TaskSpec | None = None,
+    ) -> str | None:
         if self.evidence is None:
             return None
+        provenance = list(spec.provenance) if spec is not None else []
+        # CSSSF only ever writes under sandbox/. Its results are rehearsals,
+        # never production execution proof, even when the action was governed.
+        rehearsal = self.id == "csssf" or (
+            spec is not None and spec.action_class is ActionClass.SIMULATE
+        )
         record = await self.evidence.append(
             kind=kind,
             actor=self.id,
@@ -482,6 +524,10 @@ class BaseAgent:
             correlation_id=msg.correlation_id,
             mission_id=msg.mission_id,
             classification=msg.classification.value,
+            provenance=provenance,
+            tainted=bool(spec.tainted) if spec is not None else False,
+            rehearsal_only=rehearsal,
+            origin=self.id,
             data=data,
         )
         return record.id
@@ -493,7 +539,7 @@ class BaseAgent:
             await self._reject(msg, ErrorCode.HANDLER, f"query failed: {exc}")
             return
         await self.bus.ack(self.id, msg)
-        await self.bus.publish(msg.reply_with(reply))
+        await self._publish(msg.reply_with(reply))
 
     async def _reject(self, msg: Message, code: ErrorCode | str, detail: str) -> None:
         await self.bus.ack(self.id, msg)
@@ -504,7 +550,7 @@ class BaseAgent:
         )
         # Only work requests get a failure reply; never bounce errors off replies.
         if msg.kind in ("task", "query"):
-            await self.bus.publish(msg.reply_with(payload))
+            await self._publish(msg.reply_with(payload))
         log("task.rejected", code=payload.code, detail=detail)
 
     def _idempotency_key(self, msg: Message, spec: TaskSpec) -> str | None:
@@ -697,7 +743,7 @@ class BaseAgent:
 
     async def _request(self, msg: Message, timeout_s: float | None) -> Any:
         future = self.pending.expect(msg.correlation_id)
-        await self.bus.publish(msg)
+        await self._publish(msg)
         limit = timeout_s or self.settings.task_timeout_s
         try:
             return await asyncio.wait_for(future, timeout=limit)
@@ -739,7 +785,7 @@ class BaseAgent:
                 )
 
     async def emit(self, name: str, data: dict[str, Any] | None = None) -> None:
-        await self.bus.publish(Message.event(sender=self.id, name=name, data=data))
+        await self._publish(Message.event(sender=self.id, name=name, data=data))
 
 
 class SubsystemAgent(BaseAgent):

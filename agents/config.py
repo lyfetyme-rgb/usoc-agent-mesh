@@ -4,9 +4,9 @@ import hashlib
 import hmac
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .security import SecurityError, read_secret
@@ -43,6 +43,51 @@ class Settings(BaseSettings):
     approvers: str = ""  # comma-separated allowlist; empty means any name (dev)
     require_approver_allowlist: bool = False
     approval_ttl_s: int = 86_400  # pending approvals expire after one day
+    # Fail-closed production mode. Requires managed key files, per-coordinator
+    # Ed25519 bus keys and a detached-signature-bound approver registry.
+    strict_prod: bool = False
+
+    # Per-coordinator bus identities. ``bus_public_keys_file`` is a mounted JSON
+    # trust bundle {agent_id: {kid: hex_or_pem_public_key}}; every node gets it,
+    # but only the node acting as ``bus_signing_agent`` mounts the private key
+    # (or a KMS signing URL). This prevents a low-privilege worker from forging
+    # messages as another coordinator. Inline JSON is dev/test only.
+    bus_public_keys: dict[str, dict[str, str]] | None = None
+    bus_public_keys_file: Path | None = None
+    bus_signing_agent: str | None = None
+    bus_signing_kid: str = "default"
+    bus_signing_key: str | None = Field(default=None, repr=False)
+    bus_signing_key_file: Path | None = None
+    bus_kms_sign_url: str | None = None
+    bus_kms_sign_token: str | None = Field(default=None, repr=False)
+    bus_kms_sign_token_file: Path | None = None
+    bus_kms_sign_timeout_s: float = 5.0
+
+    # Signed approver registry. It maps approver_id -> {role, public_key,
+    # max_tier} and is verified against a detached Ed25519 signature before any
+    # entry is trusted. The registry signature key is a separate trust anchor
+    # from the bus keyset, so a compromised worker cannot add an approver.
+    approver_registry: dict[str, Any] | None = None  # inline JSON, dev/test only
+    approver_registry_file: Path | None = None
+    approver_registry_signature: str | None = Field(default=None, repr=False)
+    approver_registry_signature_file: Path | None = None
+    approver_registry_public_key: str | None = None
+    approver_registry_public_key_file: Path | None = None
+    approver_registry_public_keys: dict[str, str] | None = None
+    approver_registry_public_keys_file: Path | None = None
+
+    # Human approval credentials. "detached" verifies an Ed25519 signature over
+    # the canonical approval payload with the key in the signed registry;
+    # "oidc" verifies an Okta/Entra id_token; "either" accepts both.
+    approval_credential_mode: Literal["detached", "oidc", "either"] = "either"
+    approval_require_credential: bool = False
+    approval_oidc_issuer: str | None = None
+    approval_oidc_audience: str | None = None
+    approval_oidc_jwks_url: str | None = None
+    approval_oidc_sub_claim: str = "sub"
+    approval_oidc_role_claim: str | None = None
+    approval_oidc_leeway_s: int = 60
+    approval_oidc_timeout_s: float = 5.0
 
     # configuration integrity: pin the capability-card manifest before startup.
     # SHA-256 covers the exact bytes of subsystems.yaml. The HMAC variant binds
@@ -112,6 +157,45 @@ class Settings(BaseSettings):
     # governance
     mission_id: str | None = None
     allowed_targets: str = "sandbox/*,staging/*"
+
+    # Industry Starter Profiles. The profile only filters the capability-card
+    # role *view*; all nine coordinators always run. Profile control defaults
+    # are applied by agents.profiles.settings_for_profile() and never override
+    # an explicit AGENT_* environment variable.
+    role_profile: str = "full_usoc"
+    # FinOps/banking: hard ceiling on a governed transaction. Empty = no limit.
+    max_transaction_amount: str | None = None
+    transaction_currency: str = "USD"
+    # Number of distinct verified human approvers required before HITL clears.
+    approval_quorum: int = 1
+    # Clinical: detect PII/PHI in every connector and block tainted egress.
+    phi_detection_enabled: bool = False
+    block_tainted_egress: bool = False
+    # OEKP/BENGAL compliance export formats (comma-separated).
+    evidence_export_formats: str = "jsonl"
+
+    @field_validator("approval_quorum")
+    @classmethod
+    def _positive_quorum(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("approval_quorum must be at least 1")
+        return value
+
+    @field_validator("evidence_export_formats")
+    @classmethod
+    def _export_formats(cls, value: str) -> str:
+        from .evidence import EXPORT_FORMATS
+
+        names = [part.strip() for part in str(value).split(",") if part.strip()]
+        if not names:
+            raise ValueError("evidence_export_formats must not be empty")
+        unknown = [name for name in names if name not in EXPORT_FORMATS]
+        if unknown:
+            raise ValueError(
+                f"unknown evidence export format(s): {', '.join(unknown)}; "
+                f"choose from {', '.join(sorted(EXPORT_FORMATS))}"
+            )
+        return ",".join(names)
 
     # fragmentation: read-only ingestion + cross-source correlation
     connectors_file: Path = Path("connectors.yaml")

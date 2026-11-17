@@ -1,0 +1,1 @@
+{"id":"hc-id-774","timestamp":"2026-11-14T11:04:00Z","entity":"automated-dispense-queue","entity_type":"service","aliases":["dispense-queue-04"],"severity":"high","category":"order_identity_conflict","title":"Two clinician identities signed the same dispense order","patient_id":"PT-20418","containment_target":"sandbox/automated-dispense-queue"}

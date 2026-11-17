@@ -398,11 +398,15 @@ async def test_taint_survives_a_clean_looking_intermediary(settings, monkeypatch
         mesh.orchestrator.planner = StaticPlanner(plan)
         monkeypatch.setattr(mesh.agents["acie"], "handle_task", external_payload)
         result = await mesh.run(plan.goal)
-        governed = next(m for m in mesh.trace() if m.kind == "task" and m.recipient == "csssf")
+        governed_tasks = [
+            m for m in mesh.trace() if m.kind == "task" and m.recipient == "csssf"
+        ]
+        pending = await mesh.approvals.pending()
 
     assert not result.ok, result.answer
-    assert governed.payload.tainted is True
-    assert {"connector://vendor-api", "acie", "aicee"} <= set(
-        governed.payload.provenance
-    )
-    assert "taint disclosure" in result.answer
+    # Taint-laundering defence: the tainted "read-only" step is no longer a
+    # harmless pass-through. It is gated before it can seed the mutating step.
+    assert governed_tasks == []
+    assert "handoff" in result.answer.lower()
+    assert pending and pending[0].tainted is True
+    assert {"connector://vendor-api", "acie"} <= set(pending[0].provenance)

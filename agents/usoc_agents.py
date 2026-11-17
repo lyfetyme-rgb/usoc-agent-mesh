@@ -27,7 +27,8 @@ from .contracts import (
     TaskResult,
     TaskSpec,
 )
-from .governance import ApprovalRequest
+from .evidence import sandbox_origin
+from .governance import ApprovalRequest, taint_disclosure_hash
 from .runtime import SubsystemAgent
 from .observability import log
 
@@ -92,6 +93,8 @@ class SeraphimAgent(SubsystemAgent):
             correlation_id=msg.correlation_id,
             provenance=list(data.get("provenance") or spec.provenance),
             tainted=bool(data.get("tainted", spec.tainted)),
+            amount=data.get("amount", spec.amount),
+            currency=data.get("currency", spec.currency),
         )
         self.metrics.inc("policy.evaluated")
         log("seraphim.decision", decision=decision.decision.value, target=data.get("target", spec.target))
@@ -141,6 +144,10 @@ class HitlAgent(SubsystemAgent):
                 correlation_id=msg.correlation_id,
                 provenance=list(spec.inputs.get("provenance") or spec.provenance),
                 tainted=bool(spec.inputs.get("tainted", spec.tainted)),
+                taint_hash=taint_disclosure_hash(
+                    list(spec.inputs.get("provenance") or spec.provenance),
+                    bool(spec.inputs.get("tainted", spec.tainted)),
+                ),
             )
         )
         self.metrics.inc("hitl.requested")
@@ -179,6 +186,23 @@ class OekpAgent(SubsystemAgent):
         if self.evidence is None:
             return Failure(code="oekp_unavailable", message="evidence chain not configured")
         kind = str(spec.inputs.get("kind") or "operational.event")
+        provenance = list(spec.inputs.get("provenance") or spec.provenance)
+        # Origin comes from the authenticated envelope, never from the payload.
+        origin = msg.sender
+        from_csssf = sandbox_origin(
+            origin=origin,
+            provenance=provenance,
+            sender=msg.sender,
+        ) or spec.action_class is ActionClass.SIMULATE
+        rehearsal_only = bool(spec.inputs.get("rehearsal_only", False)) or from_csssf
+        if from_csssf and not spec.inputs.get("rehearsal_only", False):
+            return Failure(
+                code="rehearsal_only",
+                message=(
+                    "CSSSF sandbox evidence requires rehearsal_only=true; "
+                    "refusing to record a rehearsal as execution proof"
+                ),
+            )
         record = await self.evidence.append(
             kind=kind,
             actor=str(spec.inputs.get("actor") or msg.sender),
@@ -186,13 +210,22 @@ class OekpAgent(SubsystemAgent):
             correlation_id=msg.correlation_id,
             mission_id=spec.mission_id or msg.mission_id,
             classification=msg.classification.value,
+            provenance=provenance,
+            origin=origin,
+            tainted=bool(spec.tainted),
+            rehearsal_only=rehearsal_only,
             data={"objective": spec.objective, "inputs": spec.inputs},
         )
         self.metrics.inc("evidence.appended")
         return TaskResult(
             ok=True,
             output=f"recorded {record.id} at seq {record.seq}",
-            data={"id": record.id, "seq": record.seq, "hash": record.hash},
+            data={
+                "id": record.id,
+                "seq": record.seq,
+                "hash": record.hash,
+                "rehearsal_only": record.rehearsal_only,
+            },
             evidence_ref=record.id,
         )
 
@@ -207,16 +240,34 @@ class BengalAgent(SubsystemAgent):
             return Failure(code="bengal_unavailable", message="evidence chain not configured")
         ok, detail = self.evidence.verify()
         head_seq, head_hash = self.evidence.head
+        records = self.evidence.records()
+        rehearsals = [r for r in records if r.rehearsal_only]
+        untrusted_sandbox = [
+            r
+            for r in records
+            if not r.rehearsal_only
+            and sandbox_origin(origin=r.origin, provenance=r.provenance)
+        ]
         self.metrics.inc("bengal.verified")
+        notes = [detail]
+        if rehearsals:
+            notes.append(f"{len(rehearsals)} rehearsal-only record(s) are not execution proof")
+        if untrusted_sandbox:
+            notes.append(f"{len(untrusted_sandbox)} unmarked sandbox-origin record(s) found")
+        trusted_for_execution = ok and not rehearsals and not untrusted_sandbox
         return TaskResult(
             ok=ok,
-            output=f"evidence chain: {detail}",
+            output="evidence chain: " + "; ".join(notes),
             data={
                 "verified": ok,
-                "detail": detail,
+                "detail": "; ".join(notes),
                 "head_seq": head_seq,
                 "head_hash": head_hash,
                 "checked": "evidence.integrity",
+                "rehearsal_only_count": len(rehearsals),
+                "rehearsal_ids": [r.id for r in rehearsals],
+                "untrusted_sandbox_count": len(untrusted_sandbox),
+                "trusted_for_execution": trusted_for_execution,
             },
             evidence_ref=head_hash[:32],
         )

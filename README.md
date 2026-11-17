@@ -34,11 +34,16 @@ cards so the full surface is visible and routable. See
 pip install -e ".[dev]"
 python -m agents doctor          # config, registry, bus, model, security
 python -m agents list            # nine cards and all 93 roles
+python -m agents profiles        # the four Industry Starter Packs and role counts
+python -m agents storyboard --vertical finance   # 3-minute Money Shot storyboard
+python -m agents export --format oekp_bengal --output exports/  # compliance export
 python -m agents demo            # one governed goal end to end
 python -m agents health          # SHELL health + diagnostics
 python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
-python -m pytest -q              # 206 passed, 1 env-gated skip, no network
+python -m agents demo-fragmentation --vertical finance      # transaction gate + dual HITL
+python -m agents demo-fragmentation --vertical healthcare   # PII/PHI taint + signed egress
+python -m pytest -q              # 274 passed, 1 env-gated skip, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
@@ -65,7 +70,7 @@ the bridge is opt-in and its tests use an injected HTTP transport.
 
 | Time | Show | Point |
 |---|---|---|
-| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Three commits: offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge. Clean remote, 206 passing with 1 symlink skip. |
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 274 passing with 1 symlink skip. |
 | 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
 | 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
 | 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |
@@ -85,6 +90,31 @@ The service-account key must be mounted as a secret; never paste it into
 configuration or chat. See
 [SECURITY.md](SECURITY.md#atlassian-publishing-bridge-opt-in) for the write gate,
 rotation procedure and verified SSRF/XSS properties.
+
+### Cross-vertical Money Shot storyboard (`agents storyboard`)
+
+One 3-minute demo shape is reused across verticals: messy signals -> entity
+resolution -> ranked risk -> proposed high-impact action -> **deterministic HOLD**.
+Only the nouns change; the last beat is always a machine-enforced HOLD, never an
+autonomous execution.
+
+```powershell
+python -m agents storyboard --vertical all        # print all three
+python -m agents storyboard --vertical finance
+python -m agents demo-fragmentation --vertical healthcare
+```
+
+| vertical | money shot |
+|---|---|
+| Cyber / infra | `Malicious IP signals -> CONTAIN prod-db-01 -> HOLD for SecOps lead` |
+| Finance | `Anomalous wire pattern -> FREEZE merchant-account-884 -> HOLD for Risk Officer` |
+| Healthcare | `Conflicting medication/lab feed -> PAUSE automated-dispense-queue -> HOLD for Attending Clinician` |
+
+The five beats are 0:00 messy signals, 0:30 entity resolution, 1:00 ranked risk,
+1:40 proposed action, 2:20 HOLD. The governed target is namespaced
+(`sandbox/<noun>`) so a vendor field cannot widen the blast radius; the buyer-facing
+noun above is what the audience sees. `--vertical` swaps the profile, fixtures,
+connector/target nouns and mission defaults in lockstep.
 
 The build-to-demo order, the non-negotiable rules, and what "done" means are
 pinned in [toolbox/PLAYBOOK.md](toolbox/PLAYBOOK.md). The delivery
@@ -141,6 +171,74 @@ if A may delegate to B, B must name A in `allowed_senders`. Only CSSSF
 to read-only/recommend work. `python -m pytest` checks that matrix so a card
 cannot quietly widen a peer's privileges.
 
+## Industry Starter Profiles
+
+Four buyer-facing packs ship with the mesh. A profile changes **what is shown**,
+not what runs: all nine coordinators stay up with their signed capability cards,
+ACLs, tool scopes and tiers. The profile only narrows the `roles` list on each
+card ("active capability-card roles"), so the routing and governance surface is
+identical in every pack.
+
+| profile id | pack | active roles | controls it turns on |
+|---|---|---|---|
+| `core` | Core Governance Pack | 12 | JSONL evidence only — smallest governed surface for general enterprise/SaaS work |
+| `finops_banking` | FinOps & Banking Pack | 24 | hard transaction ceiling (5000.00 USD), dual-approver HITL, OEKP/BENGAL exports |
+| `clinical_healthcare` | Clinical & Healthcare Pack | 22 | PII/PHI detection on every connector, restricted classification + monotone taint, signed egress guard |
+| `full_usoc` | Full USOC Defense & Critical Infrastructure Pack | 93 | every declared role (the default) |
+
+```powershell
+python -m agents profiles                        # list packs, counts and controls
+python -m agents --profile finops_banking list   # filter the role view for one run
+# or set AGENT_ROLE_PROFILE=finops_banking for the process
+```
+
+Selection is fail-closed: an unknown profile id is rejected (never silently
+"all roles"), and every role a profile names must exist on that coordinator's
+signed card. An explicit `AGENT_*` environment variable always wins over a
+profile's control default, so operators can tighten (or, with care, relax) a
+pack without editing code.
+
+### FinOps & Banking controls
+
+- **Transaction-limit gate** — `AGENT_MAX_TRANSACTION_AMOUNT` is a hard
+  execution-time ceiling. A governed transaction above it is DENIED before a
+  human review; no approval can authorize a larger sum. `AGENT_TRANSACTION_CURRENCY`
+  pins the only accepted currency (no silent conversion).
+- **Amount binding** — the approval request records the exact amount and
+  currency. Re-dispatching with a different sum or currency is DENIED even if
+  both are individually within policy.
+- **Dual-approver HITL** — `AGENT_APPROVAL_QUORUM=2` requires two **distinct
+  verified humans**. A first decision leaves the record `PENDING`; a duplicate
+  approver is rejected; the execution gate re-checks quorum and every individual
+  credential/tier. The finance demo ends in:
+  `Anomalous wire pattern -> FREEZE merchant-account-884 -> HOLD for Risk Officer`.
+
+### Clinical & Healthcare controls
+
+- **PII/PHI taint on every connector** — with `AGENT_PHI_DETECTION_ENABLED=true`,
+  every record is scanned for patient/health identifiers. A positive label raises
+  classification to `RESTRICTED`, sets monotone taint, and carries `sensitive_labels`
+  through correlation, the proposal, the approval and the evidence chain.
+  Restricted work requires a `mission_id`; a clean approval cannot authorize a
+  tainted chain.
+- **Signed external egress** — `AGENT_BLOCK_TAINTED_EGRESS=true` blocks publishing
+  tainted/restricted decisions (for example to the Atlassian bridge) unless a
+  verified detached or OIDC sign-off covers the exact egress target. A bare name,
+  an unverified credential or a mismatched target never clears the gate. Use
+  `python -m agents publish-decision <id> --signoff <approved-id>`.
+  The healthcare demo ends in:
+  `Conflicting medication/lab feed -> PAUSE automated-dispense-queue -> HOLD for Attending Clinician`.
+
+### Compliance exports
+
+The canonical store stays append-only JSONL. `python -m agents export` renders
+read-only OEKP/BENGAL views over the verified chain
+(`jsonl`, `oekp`, `bengal`, `oekp_bengal`), failing closed if the chain is not
+verifiable. The FinOps and Clinical packs enable OEKP/BENGAL formats by default.
+Because the in-memory bus uses an ephemeral signing key, set a stable
+`AGENT_SHARED_SECRET` when evidence is generated by one process and exported by
+another; otherwise MAC verification correctly fails.
+
 ## Governance, not vibes
 
 USOC's rule is that **an AI recommendation is not execution authority**. The
@@ -176,12 +274,17 @@ override its DENY.
 | `restricted` data without a `mission_id` | **DENY** |
 | governed action, no approval reference | **HOLD** — an approval request is created |
 | governed action with tainted upstream provenance | **HOLD** with taint disclosed; a clean approval cannot authorize it |
+| governed transaction above `AGENT_MAX_TRANSACTION_AMOUNT` | **DENY** at execution time — an approval cannot raise the ceiling |
+| governed transaction in a currency other than `AGENT_TRANSACTION_CURRENCY` | **DENY** — no silent conversion |
+| approval bound to a different amount or currency | **DENY** — exact transaction binding |
+| dual-approver quorum not met (fewer than `AGENT_APPROVAL_QUORUM` distinct verified humans) | **HOLD** while pending, **DENY** if a signed record lacks the distinct decisions |
 | approval is still pending | **HOLD** |
 | approval was denied | **DENY** |
 | approval has expired since it was decided | **DENY** |
 | approval does not cover this action, target and mission | **DENY** |
 | approval is approved and covers the action, target and mission | **ALLOW** + scoped authorization ref (TTL 900 s) |
 | CYBER DEFENSE task matching prohibited offensive intent | **DENY** before the model runs |
+| tainted/restricted data egress without a verified signed sign-off covering the target | **DENY** (Clinical pack) — no external publication |
 
 Runtime behaviour is consistent: `HOLD` returns a typed `Handoff`, `DENY` returns
 a typed `Failure`, `ALLOW` attaches `policy_decision_ref`, `authorization_ref`
@@ -222,7 +325,10 @@ permanent grant.
 The approver must be named in `AGENT_APPROVERS` when the allowlist is required,
 and cannot be the requester. With the memory bus the signing secret is ephemeral
 per process, so set `AGENT_SHARED_SECRET` if `approve` runs in a different
-process from the mesh; with Redis an explicit secret is mandatory.
+process from the mesh; with Redis an explicit secret is mandatory. In
+`AGENT_STRICT_PROD=1` mode the plain allowlist is replaced by a signed registry
+and every decision must carry a cryptographic credential — see
+[Production trust mode](#production-trust-mode) below.
 
 ### Evidence
 
@@ -440,7 +546,17 @@ Governance-relevant environment settings:
 ```powershell
 $env:AGENT_ALLOWED_TARGETS="sandbox/*,staging/*"   # policy allowlist
 $env:AGENT_MISSION_ID="mission-2026-11-14"         # default mission contract
+$env:AGENT_ROLE_PROFILE="finops_banking"           # active Starter Pack role view
+$env:AGENT_MAX_TRANSACTION_AMOUNT="5000.00"        # hard per-transaction ceiling
+$env:AGENT_TRANSACTION_CURRENCY="USD"
+$env:AGENT_APPROVAL_QUORUM="2"                     # distinct verified humans
+$env:AGENT_PHI_DETECTION_ENABLED="true"            # PII/PHI taint on every connector
+$env:AGENT_BLOCK_TAINTED_EGRESS="true"             # signed sign-off for external egress
+$env:AGENT_EVIDENCE_EXPORT_FORMATS="jsonl,oekp,bengal"
 ```
+
+An explicit `AGENT_*` value overrides the active profile's control default;
+`AGENT_ROLE_PROFILE=full_usoc` keeps all 93 roles. See `.env.example`.
 
 ## Security by default
 
@@ -450,10 +566,11 @@ just a laptop. The full threat model and deployment checklist are in
 
 | control | behaviour |
 |---|---|
-| message authentication | every message is HMAC-SHA256 signed and sender-bound; tampered messages go to the DLQ and are never handled |
+| message authentication | every message is signed and sender-bound (HMAC-SHA256 in dev, per-coordinator Ed25519 in production); tampered messages go to the DLQ and are never handled |
 | fail-closed transport | `AGENT_BUS=redis` requires `AGENT_SHARED_SECRET` or `AGENT_SHARED_SECRET_FILE` at startup |
-| approval identity | `AGENT_APPROVERS` allowlist, requester != approver, pending/decided TTL, mission scope |
+| approval identity | `AGENT_APPROVERS` allowlist (dev) or a signed registry bound to a key/`sub` and a `max_tier` (production); requester != approver, pending/decided TTL, mission scope |
 | approval integrity | approval records are signed; unsigned or edited records are dropped |
+| human credential | production approvals carry a detached Ed25519 signature or an Okta/Entra `id_token`, verified by HITL and logged into OEKP |
 | cross-process approvals | the file store re-reads on change and writes under a lock, so CLI approvals reach a running `serve` |
 | evidence integrity | hash-chained records plus a keyed MAC; recomputing a hash without the secret still fails |
 | secret hygiene | file-based secrets, bearer/Basic/URL/query redaction in logs, masked Redis URLs in `doctor` |
@@ -463,6 +580,11 @@ just a laptop. The full threat model and deployment checklist are in
 | capability-card integrity | startup SHA-256/HMAC pin over `subsystems.yaml`; fail closed when `AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true` |
 | topic ACLs | exact inbox topics for domain agents; wildcard publish only for `orchestrator`; wildcard subscribe only for the authenticated `oekp` audit sink |
 | read-only service | `/health` and `/ready` only, counts-only and redacted; `/diagnostics` is admin-only and hidden without `AGENT_ADMIN_TOKEN` |
+| role profiles | four Starter Packs filter capability-card role views only; all nine coordinators, ACLs, tiers and signed cards stay intact; unknown profile fails closed |
+| transaction ceiling | `AGENT_MAX_TRANSACTION_AMOUNT` is a hard execution-time ceiling in the FinOps pack; approvals bind the exact amount/currency and cannot raise the ceiling |
+| approval quorum | dual-approver HITL requires distinct verified humans; a partial quorum stays `PENDING` and the execution gate re-checks every decision |
+| PII/PHI taint | every connector can classify health/personal data, raising it to `RESTRICTED` with monotone taint that survives correlation, approval and evidence |
+| signed egress guard | tainted/restricted data cannot be published externally without a verified detached/OIDC sign-off covering the exact target (Clinical pack) |
 
 ```powershell
 # Generate the cluster secret and health token.
@@ -483,6 +605,62 @@ $env:AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY="true"
 
 `AGENT_MESSAGE_AUTH=false` exists only for local debugging. Leave it on.
 
+### Production trust mode
+
+`AGENT_STRICT_PROD=1` removes every development fallback. `agents doctor` then
+**fails closed** unless all of the following are mounted from a secret manager
+(Secrets Manager, Vault, or a KMS sidecar) — inline JSON values and inline
+signing keys are rejected:
+
+* `AGENT_SIGNING_MODE=ed25519` with a public trust bundle
+  (`AGENT_ED25519_PUBLIC_KEYS_FILE`) and a private key file or KMS signer for
+  cluster-level approval/evidence records.
+* `AGENT_BUS_PUBLIC_KEYS_FILE` — a `{agent_id: {kid: public_key}}` bundle
+  mounted on every node. Only the node acting as an identity mounts that
+  identity's private key (`AGENT_BUS_SIGNING_KEY_FILE`) or a KMS signer. A
+  compromised low-privilege connector worker cannot forge bus messages as
+  `seraphim`, `hitl`, or any other coordinator.
+* `AGENT_APPROVER_REGISTRY_FILE`, its detached signature
+  (`AGENT_APPROVER_REGISTRY_SIGNATURE_FILE`), and the trust key
+  (`AGENT_APPROVER_REGISTRY_PUBLIC_KEY_FILE`, or the multi-key bundle file).
+  The JSON maps `approver_id -> {"role": ..., "public_key": ..., "max_tier":
+  "low|medium|high|critical"}`; `max_tier` is rechecked at execution time.
+
+Generation and signing are offline steps:
+
+```powershell
+# 1. Registry signing key (never mounted on runtime nodes).
+python -m agents keygen --private-key-file secrets/registry_private.pem --public-key-file trust/registry_public.hex --key-id registry-2026-11
+
+# 2. Write trust/approvers.json: {"alice": {"role": "commander",
+#      "public_key": "<alice Ed25519 public key hex>", "max_tier": "high"}}
+# 3. Sign the exact registry bytes.
+python -m agents sign-approvers --registry-file trust/approvers.json --key-file secrets/registry_private.pem
+
+# 4. One Ed25519 keypair per coordinator; publish only the public halves in
+#    trust/bus_public_keys.json and mount only the owning node's private key.
+python -m agents keygen --private-key-file secrets/seraphim.pem --public-key-file trust/seraphim.hex --key-id seraphim-1
+```
+
+Every decision must carry a credential. Get the exact bytes to sign, sign them
+offline with the approver's Ed25519 key, then submit the detached signature; or
+pass an Okta/Entra `id_token` whose `sub` matches the registry id:
+
+```powershell
+python -m agents approval-payload apr-89d9db2cba --by alice --approve
+python -m agents approve apr-89d9db2cba --by alice --signature-file /run/secrets/alice.sig
+# OIDC alternative:
+python -m agents approve apr-89d9db2cba --by alice --id-token-file /run/secrets/alice.idtoken
+```
+
+HITL verifies the credential against the signed registry (or the configured
+JWKS) and writes an `approval.verification` record to OEKP; failed attempts are
+recorded with `verified: false`. Configure OIDC with
+`AGENT_APPROVAL_OIDC_ISSUER`, `AGENT_APPROVAL_OIDC_AUDIENCE`,
+`AGENT_APPROVAL_OIDC_JWKS_URL` and optionally `AGENT_APPROVAL_OIDC_ROLE_CLAIM`.
+See [SECURITY.md](SECURITY.md#production-trust-mode-agent_strict_prod) for the
+full trust-bundle format, key custody, rotation and checklist.
+
 ## Why this holds up
 
 | risk | mechanism |
@@ -491,9 +669,10 @@ $env:AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY="true"
 | AI overriding a DENY | policy decisions are code, not model output |
 | hidden LLM in a deterministic coordinator | startup card/class check plus `BaseAgent` no-LLM guard; no model call is possible |
 | sandbox rehearsal overwriting live artifacts | CSSSF `workspace.read`/`write` chrooted to `sandbox/` at the tool-runtime layer, with traversal and symlink escapes rejected |
-| forged or edited bus messages | sender-bound HMAC; failures are quarantined in the DLQ |
+| forged or edited bus messages | sender-bound HMAC in dev; per-coordinator Ed25519 in production, so no worker can sign as another identity; failures are quarantined in the DLQ |
 | approval replay against another target or mission | approval must match action, target and mission |
-| self-approval or an unknown approver | allowlist + requester != approver |
+| self-approval or an unknown approver | allowlist + requester != approver; in strict mode the signed registry is authoritative and a detached signature or `id_token` must bind the approver |
+| approver exceeding their authority | signed registry `max_tier` is rechecked against the action risk at execution time |
 | stale approval used later | pending approvals expire; policy denies an expired record |
 | tampered approval file | signed records; invalid signatures are dropped on load |
 | evidence tampering | hash chain + keyed MAC, independently verified |
@@ -505,6 +684,11 @@ $env:AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY="true"
 | transient provider failure | bounded exponential backoff before requeue (`AGENT_RETRY_BACKOFF_BASE_S`/`_MAX_S`) |
 | partial wave failure | at most one mutating step per wave; whole wave reported, declared undos dispatched in reverse through policy/HITL, undeclared changes listed as `uncompensated` |
 | indirect prompt injection through telemetry | monotone taint/provenance across every DAG hop; tainted actions need an approval that discloses the same chain |
+| finance transaction beyond the mandate | hard per-transaction ceiling rechecked at execution time; amount and currency bound into the approval; no silent conversion or sum drift |
+| one human approving twice / collusion | quorum counts distinct verified humans only; duplicate approvers rejected and each credential/tier rechecked at execution |
+| PII/PHI leaking through a connector | detection on every connector raises classification to `RESTRICTED` and sets taint; label flows through correlation, proposal, approval and evidence as one monotone chain |
+| tainted data exported externally | egress guard blocks bridge publication unless a verified detached/OIDC sign-off covers the exact target; a name, unverified credential or mismatched target never clears it |
+| buyer pack widening privileges | profiles only filter role views; ACLs, tool scopes and tiers come from the signed cards and are identical in every pack |
 | over-broad peer delegation | generated topic ACLs + mutually consistent sender/recipient and action/target scopes on every card |
 | one slow agent | bounded per-agent queue and `max_concurrency` |
 | runaway spend | per-step token budget, fast model tier for light agents |
@@ -622,9 +806,14 @@ agents/
   contracts.py     Message union, governance envelope, plans, limits
   bus.py           Bus protocol, InMemoryBus, RedisBus
   runtime.py       BaseAgent: mailbox, governance gate, delegate/ask
-  governance.py    deterministic policy engine, approvals
-  evidence.py      append-only hash-chained, MAC-protected evidence
-  security.py      HMAC signer, secret loading, redaction, file locks
+  governance.py    deterministic policy engine, approvals, transaction/quorum gates
+  evidence.py      append-only hash-chained, MAC-protected evidence, OEKP/BENGAL exports
+  security.py      HMAC signer, secret loading, redaction, file locks, PII/PHI detection
+  profiles.py      four Industry Starter Packs + control-default overrides
+  storyboards.py   cross-vertical 3-minute Money Shot storyboards
+  egress.py        signed egress guard for tainted/restricted data
+  trust.py         production trust mode + detached/OIDC verification helpers
+  oidc.py          OIDC token verification (JWKS, issuer, audience)
   service.py       read-only /health and /ready server
   usoc_agents.py   SERAPHIM/OEKP/BENGAL/HITL deterministic handlers
   shell.py         SHELL health, readiness, discovery and diagnostics
@@ -634,9 +823,13 @@ agents/
   tools.py         sandboxed workspace tools + evidence tools
   store.py         idempotency store
   mesh.py          composition root
-  __main__.py      CLI (demo, list, doctor, integrity, serve, probe, health, approvals)
+  __main__.py      CLI (demo, list, profiles, storyboard, export, doctor, integrity, serve, ...)
 docs/architecture.md
 subsystems.yaml
+fixtures/
+  fragmentation/  cyber/infra demo signals (Malicious IP -> CONTAIN prod-db-01)
+  finance/        wire/ledger/merchant signals (FREEZE merchant-account-884)
+  healthcare/     medication/lab/dispense signals (PAUSE automated-dispense-queue)
 Dockerfile
 docker-compose.yml
 docker-compose.workers.example.yml
@@ -695,3 +888,14 @@ Choose one. Under BSL 1.1 the code becomes Apache 2.0 on 2030-11-15.
   secret. Keep Redis private and enable TLS for untrusted networks.
 - The health endpoint has no rate limiting; bind it to loopback or put it behind
   a proxy.
+- PII/PHI detection is heuristic (key and value patterns), not a clinical-grade
+  classifier: it is a *classification* signal layered on top of field redaction,
+  not a redaction substitute. Tune the patterns for your data and keep raw
+  identifiers out of connector payloads where possible.
+- The egress guard applies to bridge/decision publication. Other egress paths
+  (operator-initiated network calls, logs) are outside its scope; keep the mesh
+  network-segmented and review anything that can read the workspace.
+- The transaction ceiling and quorum are profile defaults that an operator can
+  override with explicit `AGENT_*` values. Treat those variables as governed
+  configuration: the hard ceiling cannot be relaxed by an approval, but it can
+  be raised by whoever controls the process environment.

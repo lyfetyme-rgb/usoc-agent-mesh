@@ -83,6 +83,8 @@ class CorrelatedIncident(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     summary: str
     classification: Classification = Classification.INTERNAL
+    tainted: bool = False
+    sensitive_labels: list[str] = Field(default_factory=list)
     truncated: bool = False
 
 
@@ -283,6 +285,8 @@ def _build_incident(cluster: list[Signal], max_signals: int) -> CorrelatedIncide
         reasons=reasons,
         summary=summary,
         classification=classification,
+        tainted=any(s.tainted for s in cluster),
+        sensitive_labels=sorted({label for s in cluster for label in s.sensitive_labels}),
         truncated=truncated,
     )
 

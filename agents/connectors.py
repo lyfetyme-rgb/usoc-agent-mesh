@@ -47,7 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .config import Settings
 from .contracts import Classification
-from .security import redact_fields
+from .security import detect_sensitive_data, redact_fields
 
 MAX_ATTRIBUTES_BYTES = 16 * 1024
 MAX_DETAIL_CHARS = 8_000
@@ -153,6 +153,10 @@ class Signal(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list, max_length=20)
     classification: Classification = Classification.INTERNAL
+    # Clinical pack: PII/PHI detected in this record. A positive label forces
+    # taint propagation and restricted classification on every downstream step.
+    sensitive_labels: list[str] = Field(default_factory=list, max_length=12)
+    tainted: bool = False
     provenance: Provenance
     fingerprint: str = Field(default="", max_length=64)
 
@@ -318,8 +322,14 @@ class FieldMap(BaseModel):
 class MappingAdapter:
     """Deterministic adapter from a vendor record to the normalized schema."""
 
-    def __init__(self, field_map: FieldMap | None = None) -> None:
+    def __init__(
+        self,
+        field_map: FieldMap | None = None,
+        *,
+        phi_detection_enabled: bool = False,
+    ) -> None:
         self.map = field_map or FieldMap()
+        self.phi_detection_enabled = bool(phi_detection_enabled)
 
     def adapt(
         self,
@@ -356,6 +366,15 @@ class MappingAdapter:
             entity_type = _parse_entity_type(_first(raw, self.map.entity_type))
 
         classification = _parse_classification(_first(raw, ["classification", "data_classification"]))
+        # Clinical pack: every connector is checked, not just a "health" source.
+        # A positive PII/PHI label is monotone: it can raise classification and
+        # set taint, but a vendor label can never lower either.
+        sensitive_labels = detect_sensitive_data(
+            raw, enabled=self.phi_detection_enabled
+        )
+        tainted = bool(sensitive_labels)
+        if sensitive_labels:
+            classification = Classification.RESTRICTED
 
         return Signal(
             source=source,
@@ -372,6 +391,8 @@ class MappingAdapter:
             attributes=attributes,
             tags=tags,
             classification=classification,
+            sensitive_labels=sensitive_labels,
+            tainted=tainted,
             provenance=provenance,
         )
 
@@ -750,7 +771,10 @@ def load_connectors(
         field_map = config.field_map or FieldMap()
         if config.entity_type is not None:
             field_map = field_map.model_copy(update={"default_entity_type": config.entity_type})
-        adapter = MappingAdapter(field_map)
+        adapter = MappingAdapter(
+            field_map,
+            phi_detection_enabled=settings.phi_detection_enabled,
+        )
 
         if config.type == "jsonl":
             connectors.append(
@@ -827,6 +851,7 @@ def build_fixture_connectors(settings: Settings, directory: str | Path) -> list[
     if not base.is_dir():
         raise ConnectorConfigError(f"fixtures directory not found: {base}")
     connectors: list[Connector] = []
+    adapter = MappingAdapter(phi_detection_enabled=settings.phi_detection_enabled)
     for path in sorted(base.glob("*.jsonl")):
         source_type = FIXTURE_SOURCES.get(path.stem, SourceType.OTHER)
         connectors.append(
@@ -835,6 +860,7 @@ def build_fixture_connectors(settings: Settings, directory: str | Path) -> list[
                 source_type=source_type,
                 path=path.name,
                 root=base,
+                adapter=adapter,
                 max_records=settings.connector_max_records,
                 max_line_bytes=min(settings.connector_max_bytes, 256 * 1024),
             )

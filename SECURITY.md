@@ -34,7 +34,11 @@ without the secret.
 * `AGENT_MAX_MESSAGE_AGE_S` optionally rejects old messages. It is off by
   default because at-least-once delivery can legitimately redeliver a message.
 
-Set `AGENT_MESSAGE_AUTH=false` only for local debugging.
+Set `AGENT_MESSAGE_AUTH=false` only for local debugging. For production,
+`AGENT_STRICT_PROD=1` replaces the symmetric cluster secret with
+**per-coordinator Ed25519 keys**, so a node that can verify messages cannot
+forge them as another identity; see
+[Production trust mode](#production-trust-mode-agent_strict_prod).
 
 ### Asymmetric signing (Ed25519)
 
@@ -121,8 +125,10 @@ Consequential actions (`execute`, `contain`) require a human approval. The
 approval store enforces:
 
 * **Allowlist** — `AGENT_APPROVERS` names the humans who may decide. Set
-  `AGENT_REQUIRE_APPROVER_ALLOWLIST=true` in production so an empty allowlist is
-  a hard failure instead of "any name can approve".
+  `AGENT_REQUIRE_APPROVER_ALLOWLIST=true` so an empty allowlist is a hard failure
+  instead of "any name can approve". In `AGENT_STRICT_PROD=1` this is superseded
+  by the [signed approver registry](#signed-approver-registry), where each name
+  is bound to a public key (or OIDC `sub`) and a maximum risk tier.
 * **Four eyes** — the requester can never approve their own request.
 * **Expiry** — pending approvals older than `AGENT_APPROVAL_TTL_S` are denied,
   both when deciding and when the policy engine re-evaluates them. An approval
@@ -133,6 +139,15 @@ approval store enforces:
 * **Action and exact target binding** — an approval for `sandbox/node-1` cannot
   be replayed against `prod/db-primary`, and a wildcard target does not
   authorize concrete hosts.
+* **Risk ceiling** — a HIGH approval may cover a LOW action of the same scope,
+  but a LOW approval can never be escalated to HIGH or CRITICAL.
+* **Single use** — every approval carries a `nonce` that is atomically spent on
+  the first ALLOW. The runtime checks its idempotency cache *before* the policy
+  gate so a redelivery cannot spend it again, and OEKP records the spent nonce
+  as `approval.consumed` evidence so consumption is auditable.
+* **Taint disclosure hash** — the approval commits to the provenance labels and
+  taint flag the human reviewed. Relabelling a poisoned payload with a trusted
+  source invalidates the approval.
 * **Signatures** — records are signed with the cluster secret. Unsigned or
   tampered records are dropped when loaded; they never become an ALLOW.
 * **Cross-process safety** — `FileApprovalStore` re-reads when the file changes
@@ -141,6 +156,155 @@ approval store enforces:
 
 The HITL agent routes approvals; it has no code path that decides them. An agent
 identity is never a valid approver.
+
+### Production trust mode (`AGENT_STRICT_PROD=1`)
+
+The HMAC signer and the plain `AGENT_APPROVERS` allowlist are development
+conveniences: anyone who can read the cluster secret can sign as **any**
+coordinator, and a bare name is not proof that a human authorised anything.
+Setting `AGENT_STRICT_PROD=1` removes those fallbacks. `agents doctor` then exits
+non-zero unless the complete trust chain is configured from mounted files or a
+KMS-backed signer; inline JSON keys, inline approver registries and inline shared
+secrets are all refused. No cloud SDK is needed: the secret manager (AWS Secrets
+Manager, Vault, a KMS sidecar) injects files or exposes a signing endpoint.
+
+`validate_strict_prod()` checks, and `doctor` fails closed on:
+
+* `AGENT_MESSAGE_AUTH` enabled and no ephemeral secret (a random in-memory key
+  is never acceptable).
+* `AGENT_SIGNING_MODE=ed25519` for cluster-level approval/evidence records.
+* Managed key material — mounted public/private key files or a KMS signer, no
+  inline key values.
+* `AGENT_BUS_PUBLIC_KEYS_FILE` (mounted, not inline) with per-coordinator
+  Ed25519 identities.
+* `AGENT_APPROVER_REGISTRY_FILE`, its detached signature file and a mounted
+  registry trust-key file.
+* At least one approver in the signed registry with a valid `role`, public key
+  and `max_tier`.
+
+#### Per-coordinator bus identities
+
+Every node mounts the same trust bundle
+`AGENT_BUS_PUBLIC_KEYS_FILE` — a JSON object of the form:
+
+```json
+{
+  "seraphim": {"seraphim-1": "<hex or PEM public key>"},
+  "hitl":     {"hitl-1":     "<hex or PEM public key>"},
+  "bengal":   {"bengal-1":   "<hex or PEM public key>"}
+}
+```
+
+Only the node acting as a given coordinator mounts *that* identity's private
+key (`AGENT_BUS_SIGNING_KEY_FILE`) or is allowed to call its KMS key
+(`AGENT_BUS_KMS_SIGN_URL`). It declares which identity it is with
+`AGENT_BUS_SIGNING_AGENT` and which key with `AGENT_BUS_SIGNING_KID`. The bus
+signer/verifier interface is unchanged: messages are still signed by
+`sign_message()` and checked by `verify_message()`, but the key is selected by
+the `sender` field and the claimed `kid`.
+
+The verifier fails closed when the sender is unknown, the `kid` is not in that
+sender's bundle, `signature_alg` is not `ed25519`, the signature does not verify,
+or (when `AGENT_MAX_MESSAGE_AGE_S` is set) the message is stale. The `alg` and
+`kid` fields are set *before* signing and are part of the signed canonical
+message, so an attacker cannot relabel a valid message with another identity's
+key id or algorithm. A compromised low-privilege connector worker that mounts
+only its own key therefore cannot forge a message as `seraphim`, `hitl`, or any
+other coordinator — it has no signing slot for those senders.
+
+Cluster-level records (approvals, evidence, ADRs, capability-card signatures)
+continue to use `AGENT_SIGNING_MODE=ed25519` with the shared trust bundle from
+the previous section; that key is independent of the per-coordinator bus keys.
+Mount only the public halves on read-only nodes. A runtime that signs through a
+KMS sidecar sends a `POST` of the exact canonical bytes with an optional
+`Authorization: Bearer` token (`AGENT_BUS_KMS_SIGN_TOKEN_FILE`) and expects
+`{"signature": "<hex or base64>", "key_id": "<kid>"}`. The mesh rejects a
+response whose `key_id` is not in the trusted bundle or whose signature is not a
+64-byte Ed25519 value. For cluster-level signing the equivalent settings are
+`AGENT_KMS_SIGN_URL` / `AGENT_KMS_SIGN_TOKEN_FILE`.
+
+Generate one keypair per coordinator offline and publish only the public halves:
+
+```bash
+python -m agents keygen \
+  --private-key-file secrets/seraphim.pem \
+  --public-key-file trust/seraphim.hex \
+  --key-id seraphim-1
+```
+
+Rotation follows the bundle model already described: add the new public key to
+the bundle on every node while keeping the old one, switch
+`AGENT_BUS_SIGNING_KID` (and the KMS key), let in-flight messages drain, then
+remove the retired key.
+
+#### Signed approver registry
+
+Replace plain names with a signed JSON document:
+
+```json
+{
+  "alice": {
+    "role": "commander",
+    "public_keys": {"alice-1": "<hex or PEM public key>"},
+    "max_tier": "high"
+  },
+  "bob": {"role": "operator", "public_key": "<hex key>", "max_tier": "medium"}
+}
+```
+
+`public_key` (single) and `public_keys` (`{kid: key}`) are both accepted; both
+support key rotation. `max_tier` uses the `RiskLevel` vocabulary
+`low`/`medium`/`high`/`critical`. Sign the exact file bytes offline with a key
+that is distinct from the bus keys:
+
+```bash
+python -m agents sign-approvers \
+  --registry-file trust/approvers.json \
+  --key-file secrets/registry_private.pem
+# writes trust/approvers.json.sig
+```
+
+At startup the mesh verifies the signature over the raw bytes *before* parsing
+any entry; a one-byte tamper fails closed. When a registry is configured it is
+authoritative: configured plain names are intersected with registry ids, and an
+unknown name can never approve. The registry trust key is a separate anchor, so
+a worker that compromises its own bus key cannot add an approver.
+
+`max_tier` is not just advisory: `PolicyEngine.evaluate` rechecks the approver's
+ceiling against the action's risk at execution time. An approver whose registry
+entry allows `high` cannot authorise a `critical` action even with an otherwise
+valid decision record.
+
+#### Human credentials
+
+Strict mode requires every `approve`/`deny` decision to carry a credential. Two
+forms are supported, selected by `AGENT_APPROVAL_CREDENTIAL_MODE`
+(`detached`, `oidc`, or `either`):
+
+* **Detached Ed25519 signature.** The human signs a canonical payload bound to
+  the approval id, action, target, risk, mission, requester, decided-by identity
+  and approve/deny decision. Print the exact bytes with
+  `python -m agents approval-payload <id> --by alice --approve`, sign them with
+  the approver's private key, and submit with
+  `python -m agents approve <id> --by alice --signature-file /run/secrets/alice.sig`
+  (or `--signature <hex>`). HITL verifies against the public key in the signed
+  registry. A credential for a different approval, target, mission or decision
+  does not verify.
+* **OIDC / SSO id_token.** Set `AGENT_APPROVAL_OIDC_ISSUER`,
+  `AGENT_APPROVAL_OIDC_AUDIENCE` and `AGENT_APPROVAL_OIDC_JWKS_URL` (Okta or
+  Entra ID), then pass `--id-token-file` (or `--id-token`). The verifier checks
+  the JOSE header (`RS256`/`ES256`), `kid`, signature, issuer, audience, `exp`
+  and `nbf`, and binds the configured `sub` claim (default `sub`, override with
+  `AGENT_APPROVAL_OIDC_SUB_CLAIM`) to the registry id. If
+  `AGENT_APPROVAL_OIDC_ROLE_CLAIM` is set, the token must also contain the entry's
+  `role`. JWKS responses are cached briefly; no JWT library is added.
+
+HITL writes an `approval.verification` record to OEKP for every verified
+credential, including the method, key id/fingerprint or token subject, role and
+max tier. Rejected attempts are recorded with `verified: false`. The verification
+result is stored on the signed approval record and included in the
+`approval.decided` evidence, so an auditor can see exactly how identity was
+established without access to the raw credential.
 
 ### Evidence
 
@@ -213,6 +377,10 @@ injected HTTP transport, so no live Atlassian writes occur in CI.
 
 * Prefer `AGENT_SHARED_SECRET_FILE` and `AGENT_HEALTH_TOKEN_FILE` over inline
   environment variables; the Docker image uses mounted secrets.
+* In `AGENT_STRICT_PROD=1` the only acceptable inputs are mounted key/registry
+  files or a KMS signing endpoint. Inline JSON keys, inline approver registries
+  and inline shared secrets are rejected so nothing sensitive leaks into env
+  files, process listings or logs.
 * With the memory bus the signing secret is ephemeral per process. Set
   `AGENT_SHARED_SECRET` if `agents approve` must verify approvals written by a
   different process; with Redis an explicit secret is mandatory.
@@ -418,6 +586,89 @@ step records carry the same metadata so compensation and audit stay honest.
 Idempotency keys are also scoped by taint and provenance, so a clean cache entry
 cannot be replayed for a tainted re-dispatch of the same objective.
 
+### Industry Starter Profiles
+
+Four buyer-facing packs ship with the mesh: `core` (12 roles),
+`finops_banking` (24), `clinical_healthcare` (22) and `full_usoc` (93, the
+default). A profile is a **view filter**, not an execution boundary: all nine
+coordinators keep running with their signed capability cards, topic ACLs, tool
+scopes and risk tiers. `apply_role_profile()` narrows only each card's `roles`
+list; it never widens a topic, adds a tool or changes a tier. This means a profile
+cannot grant a privilege the full mesh does not already have.
+
+Selection is fail-closed. `get_profile()` and `apply_role_profile()` reject an
+unknown profile id with `RegistryError` rather than silently falling back to
+"all roles", and every named role is validated against the signed card at import
+and at startup. Profile control defaults (transaction ceiling, quorum, PII/PHI
+detection, egress blocking, export formats) are applied only when the matching
+explicit `AGENT_*` variable is unset, so an operator's setting always wins.
+Treat those environment variables as governed configuration.
+
+### Transaction ceilings and dual-approver quorum
+
+The FinOps & Banking profile adds two hard controls:
+
+* `AGENT_MAX_TRANSACTION_AMOUNT` is a **hard execution-time ceiling**, not a
+  recommendation. `PolicyEngine.evaluate()` parses the transaction amount with
+  `parse_money()` (strict finite, non-negative, at most four decimal places) and
+  DENIES anything above the ceiling **before** an approval is consulted. A human
+  approval can never authorize a larger sum. `AGENT_TRANSACTION_CURRENCY` pins
+  the only accepted currency, so a foreign-currency amount is DENIED instead of
+  silently converted.
+* The approval request records the exact amount and currency. Re-dispatching the
+  same approval against a different sum or currency is DENIED by the binding
+  check even if both values are individually within policy.
+* `AGENT_APPROVAL_QUORUM=2` requires two **distinct verified humans**. A single
+  decision leaves the record `PENDING`, so evaluation still HOLDs; a duplicate
+  approver is rejected by `ApprovalStore.decide()`. The execution-time check
+  re-verifies every individual decision (credential, `max_tier` risk ceiling,
+  nonce, TTL and scope) before ALLOW, so a partially-approved or stale quorum
+  cannot slip through. The existing single-approver fallback remains the default
+  for other profiles.
+
+### PII/PHI classification on every connector
+
+The Clinical & Healthcare profile enables `AGENT_PHI_DETECTION_ENABLED`. Each
+connector record is scanned by `detect_sensitive_data()` for health and personal
+identifier keys/values (for example patient id, diagnosis, MRN, SSN, email). A
+positive label raises classification to `RESTRICTED`, sets `tainted=True`, and
+attaches `sensitive_labels`. This is a **classification** signal layered on top
+of existing field redaction, not a redaction substitute.
+
+The label is monotone: provenance and sensitive labels survive correlation, the
+proposal, the approval request (`taint_hash` disclosure) and the evidence chain.
+Restricted work requires a `mission_id`, and a clean approval cannot authorize a
+tainted chain. The detector is heuristic (pattern based), not a clinical-grade
+classifier; tune it for your data and keep raw identifiers out of payloads where
+possible.
+
+### Signed egress guard
+
+Connectors are read-only, but publishing a decision to the Atlassian bridge (or
+another external sink) moves governed data outside the mesh. With
+`AGENT_BLOCK_TAINTED_EGRESS=true`, `EgressGuard.assert_allowed()` blocks any
+tainted or `RESTRICTED` publication unless a sign-off satisfies all of:
+
+* the approval record's status is `APPROVED` (not `PENDING`/`DENIED`);
+* its `target` (or one of `also_targets`) covers the exact egress target; and
+* it carries a verification with `verified=True` whose method is `detached`
+  (Ed25519) or `oidc`.
+
+A bare approver name, an unverified credential, a mismatched target or a pending
+record never clears the gate. Use
+`python -m agents publish-decision <id> --signoff <approved-id>`. The guard is
+wired into decision publication/bridge publication; other network paths are
+outside its scope, so keep the mesh network-segmented.
+
+### Compliance exports
+
+The canonical store remains an append-only, hash/MAC-chained JSONL file.
+`render_export()` produces read-only views in `jsonl`, `oekp`, `bengal` and
+`oekp_bengal` formats and fails closed if the chain is not verifiable (`bengal`
+sets `assurance=FAIL` when verification fails). The FinOps & Banking and Clinical
+& Healthcare profiles enable OEKP/BENGAL export formats by default; an explicit
+`AGENT_EVIDENCE_EXPORT_FORMATS` or `agents export --format ...` overrides it.
+
 ### Topic ACLs and wildcards
 
 The mesh derives bus ACLs from the capability cards at startup. A domain agent
@@ -434,6 +685,72 @@ exact topics on its card. Wildcards are control-plane conveniences:
 
 `bus.validate_topic_acls` enforces these rules at construction time, and the
 subscribe/publish paths re-check wildcard requests at runtime.
+
+In addition to the topic patterns above, two control-plane broadcasts are
+pinned to a single identity: `policy.verdict` may only be published by
+`seraphim`, and `approval.granted` only by `hitl`. The rules are derived from
+the mounted message authority; in strict production they also pin the exact
+signing `kid`, and `agents doctor` fails closed if either topic has no managed
+kid. The check runs *after* signing on the trusted `signing_kid`, in both buses,
+and Redis re-applies it on receive so a direct stream injection is quarantined
+to `mesh:dlq` instead of being delivered.
+
+### Governance red team
+
+`tests/test_governance_redteam.py` covers the four adversarial paths that matter
+once work is spread across workers. Every case is expected to fail closed; the
+suite runs in normal CI alongside the rest of the tests.
+
+#### Approval replay and scope creep
+
+An approval is a signed, single-use credential, not a bearer token. On the
+first ALLOW the policy engine atomically spends its `nonce` through
+`ApprovalStore.consume()`; a second evaluation is DENIED with
+`already consumed`. Every ALLOW also appends an `approval.consumed` record to
+the evidence chain through OEKP with the approval id, nonce, action, target,
+risk and taint disclosure, so consumption is auditable rather than
+process-local.
+
+Before anything is consumed, the engine rechecks the signed scope at execution
+time: action and target, mission, risk ceiling, TTL (from decision time) and
+taint disclosure hash. A low-risk approval cannot be escalated to critical; a
+higher-risk approval may cover a lower-risk variant of the same scope. The
+`taint_hash` commits to the set of provenance labels and the taint flag shown
+to the human, so swapping a poisoned source for a "trusted" label invalidates
+the approval. Failed scope-creep attempts do not spend the nonce: the correct
+scope still succeeds afterwards.
+
+#### Taint laundering
+
+Taint is a gate, not a label. A tainted `read_only`, `recommend` or `simulate`
+step is held for HITL just like `execute`/`contain`: a poisoned connector
+payload cannot be summarised into a clean-looking step that seeds a later
+mutating step. `PolicyEngine` forces HOLD, the HITL request records the full
+provenance and taint hash, and the runtime fails closed when a tainted task
+reaches an agent with no policy engine. Taint and provenance survive
+`TaskResult` and are folded into idempotency keys, so a clean cached result
+cannot be replayed for a tainted re-dispatch of the same objective.
+
+#### Sandbox spoofing
+
+Evidence records carry `origin` (derived from the authenticated message
+sender, never from task inputs), `provenance`, `tainted` and `rehearsal_only`,
+all covered by the hash/MAC chain. OEKP rejects any sandbox-origin record that
+is not explicitly marked `rehearsal_only` with
+`Failure(code="rehearsal_only")`. BENGAL counts rehearsal-only and unmarked
+sandbox records and sets `trusted_for_execution=false` when either is present,
+even when the structural chain verifies. Rehearsals are visible to auditors but
+can never be presented as production execution proof.
+
+#### Cross-worker impersonation
+
+`policy.verdict` and `approval.granted` are pinned to `seraphim` and `hitl`
+respectively, including the signing `kid` in strict production. Publish checks
+run after signing in both the memory and Redis buses; the runtime also fails
+early in `_publish()`. Redis rechecks on receive and quarantines a forged
+stream entry, closing the bypass where a sibling worker writes directly to the
+stream with its own valid key. A worker that mounts only its own coordinator
+key therefore cannot emit a verdict or grant as another identity.
 
 ### Read-only connectors and correlation
 
@@ -487,8 +804,10 @@ docker compose --env-file .env.docker down
 ## Deployment checklist
 
 - [ ] `AGENT_BUS=redis` and a password-protected Redis URL.
-- [ ] `AGENT_SHARED_SECRET_FILE` points at a mounted secret of at least 32 chars.
-- [ ] `AGENT_REQUIRE_APPROVER_ALLOWLIST=true` and `AGENT_APPROVERS` names real humans.
+- [ ] `AGENT_SHARED_SECRET_FILE` points at a mounted secret of at least 32 chars
+      (dev/HMAC only; strict mode uses Ed25519 instead).
+- [ ] `AGENT_REQUIRE_APPROVER_ALLOWLIST=true` and `AGENT_APPROVERS` names real humans
+      (dev/HMAC only; strict mode uses the signed registry below).
 - [ ] `AGENT_SUBSYSTEMS_MANIFEST_HASH` or `AGENT_SUBSYSTEMS_SIGNATURE` is pinned and
       `AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY=true`.
 - [ ] `AGENT_ADMIN_TOKEN_FILE` is mounted if `/diagnostics` is needed, and it is
@@ -505,6 +824,24 @@ docker compose --env-file .env.docker down
 - [ ] `python -m agents doctor` passes in the deployed environment.
 - [ ] Approvals and evidence are tested end to end after any secret change.
 
+For `AGENT_STRICT_PROD=1`, additionally:
+
+- [ ] `AGENT_SIGNING_MODE=ed25519` with a mounted `AGENT_ED25519_PUBLIC_KEYS_FILE`
+      and a private key file or KMS signer for cluster-level records.
+- [ ] `AGENT_BUS_PUBLIC_KEYS_FILE` is mounted on every node; each node mounts
+      only the private key (or KMS key id) for its own `AGENT_BUS_SIGNING_AGENT`.
+- [ ] `AGENT_MAX_MESSAGE_AGE_S` is set to a small replay window compatible with
+      your at-least-once delivery.
+- [ ] `AGENT_APPROVER_REGISTRY_FILE`, `AGENT_APPROVER_REGISTRY_SIGNATURE_FILE`
+      and a mounted registry trust-key file are present; every approver has a
+      reviewed `role`, public key and `max_tier`.
+- [ ] `AGENT_APPROVAL_CREDENTIAL_MODE` is `detached`, `oidc` or `either`, and
+      production decision flows supply `--signature(-file)` or
+      `--id-token(-file)`. OIDC mode has issuer, audience and JWKS URL configured
+      with role-claim mapping if roles are enforced.
+- [ ] `python -m agents doctor` reports `strict production ... managed keys,
+      signed approvers and per-coordinator signatures` and exits 0.
+
 ## Secret rotation
 
 The cluster secret is the trust root for messages, approvals and evidence MACs.
@@ -516,8 +853,12 @@ evidence records fail MAC verification. Treat rotation as a migration:
 3. Start a new evidence chain and approval store under the new secret.
 4. Record the rotation itself as the first evidence entry in the new chain.
 
-Key-id based rotation (verifying with a previous key while signing with the
-current one) is the next step if long-lived evidence must survive rotation.
+With `AGENT_SIGNING_MODE=ed25519` and `AGENT_STRICT_PROD=1`, key-id based
+rotation is supported for both cluster-level records and per-coordinator bus
+keys: keep the old public key in the trust bundle while signing with the new
+`AGENT_ED25519_KEY_ID` / `AGENT_BUS_SIGNING_KID`, let in-flight waves and stored
+records drain, then remove the retired key from the bundle. See the rotation
+steps in the sections above.
 
 ## Residual risks
 
@@ -527,17 +868,46 @@ current one) is the next step if long-lived evidence must survive rotation.
 * Approval state is a local file by default. In a multi-host deployment, put it on
   shared storage that preserves atomic replace and locking, or replace it with a
   transactional database store.
-* There is no role-based authorization beyond the approver allowlist. Any process
-  with the shared secret can sign as any agent; keep the secret to the mesh.
+* In HMAC/dev mode there is no role-based authorization beyond the approver
+  allowlist, and any process with the shared secret can sign as any agent; keep
+  the secret to the mesh. `AGENT_STRICT_PROD=1` addresses both: per-coordinator
+  Ed25519 keys stop a worker signing as another identity, the signed registry
+  binds an approver to a key/`sub` and `max_tier`, and every decision must carry
+  a verified detached signature or id_token.
 * The in-memory bus is single-process and provides no isolation between agents.
 * The health endpoint has no rate limiting. Keep it on loopback or behind a proxy.
 * `EchoLLM` is not a security boundary. Real model endpoints are untrusted and
   must remain outside the policy decision path.
 * The evidence chain is local JSONL. For production, ship the head to immutable
   storage and monitor verification failures.
+* `taint_hash` commits to provenance labels and the taint flag, not to the
+  payload bytes. Two different payloads carrying the same labels are not
+  distinguishable at approval time; keep upstream provenance labels precise.
+* Restricted-topic `kid` pinning depends on per-coordinator managed keys. In
+  dev/HMAC mode the sender check still applies, but that mode is not a
+  production trust boundary.
+* Approval consumption is atomic only against the configured store.
+  `FileApprovalStore` relies on cross-process file locking, so shared storage
+  must preserve it; use a transactional store for multi-host deployment.
+* BENGAL's verification is structural. It reports rehearsal and sandbox-origin
+  metadata and withholds `trusted_for_execution`, but it does not semantically
+  prove that a governed action actually happened. Keep external execution
+  audit independent of the evidence chain.
 * Connector data is untrusted and may be adversarial. Correlation limits the
   blast radius (bounded fields, redaction, no writes), but a compromised source
   can still create false incidents. Treat proposals as recommendations and keep
   the human approver independent of the source system.
 * The HTTP connector validates the URL host, not the resolved IP. Deploy it with
   egress controls or a proxy if the allowlisted host can resolve internally.
+* PII/PHI detection is heuristic pattern matching over keys and values. It is a
+  classification signal, not a clinical-grade classifier or a redaction
+  substitute; tune the patterns for your domain and keep raw identifiers out of
+  connector payloads. An unrecognized label will not raise classification.
+* The egress guard covers decision/bridge publication only. It does not inspect
+  arbitrary network calls, logs or operator-initiated exports; keep the mesh
+  network-segmented and review any component that can read the workspace.
+* Profile control defaults can be overridden by explicit `AGENT_*` environment
+  variables. The transaction ceiling cannot be relaxed by an approval, but it
+  can be raised by whoever controls the process environment, so protect those
+  variables as governed configuration. A role profile filters role views only;
+  it does not reduce the runtime privileges of the nine coordinators.

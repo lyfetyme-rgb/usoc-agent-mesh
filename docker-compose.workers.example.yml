@@ -10,6 +10,13 @@ name: usoc-mesh-scaled
 #
 # Demand signal: `python -m agents scale-advice` prints desired replicas per
 # agent from Redis backlog (pending entries per consumer group).
+#
+# Production trust: enable AGENT_STRICT_PROD=1 on every process and use
+# per-coordinator Ed25519 bus keys instead of a shared HMAC secret. Every node
+# mounts the same AGENT_BUS_PUBLIC_KEYS_FILE, but each worker mounts ONLY the
+# private key for its own AGENT_BUS_SIGNING_AGENT. A compromised worker cannot
+# forge bus messages as `seraphim`, `hitl` or a sibling worker. See SECURITY.md
+# ("Production trust mode") and the commented examples in each service below.
 
 services:
   redis:
@@ -50,11 +57,32 @@ services:
       AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
       AGENT_APPROVERS: ${AGENT_APPROVERS:?set AGENT_APPROVERS in .env.docker}
       AGENT_LOG_JSON: "true"
+      # --- Production trust (AGENT_STRICT_PROD=1) ---------------------------
+      # Uncomment as a group on all processes once trust files are mounted.
+      # AGENT_STRICT_PROD: "1"
+      # AGENT_SIGNING_MODE: ed25519
+      # AGENT_ED25519_PUBLIC_KEYS_FILE: /run/secrets/ed25519_public_keys.json
+      # AGENT_ED25519_PRIVATE_KEY_FILE: /run/secrets/ed25519_private.pem
+      # AGENT_BUS_PUBLIC_KEYS_FILE: /run/secrets/bus_public_keys.json
+      # AGENT_BUS_SIGNING_AGENT: seraphim
+      # AGENT_BUS_SIGNING_KID: seraphim-1
+      # AGENT_BUS_SIGNING_KEY_FILE: /run/secrets/bus_seraphim.pem
+      # AGENT_APPROVER_REGISTRY_FILE: /run/secrets/approvers.json
+      # AGENT_APPROVER_REGISTRY_SIGNATURE_FILE: /run/secrets/approvers.json.sig
+      # AGENT_APPROVER_REGISTRY_PUBLIC_KEY_FILE: /run/secrets/approvers_public.hex
+      # AGENT_APPROVAL_REQUIRE_CREDENTIAL: "1"
     secrets:
       - agent_shared_secret
       - health_token
     volumes:
       - mesh-data:/data
+      # - ./trust/bus_public_keys.json:/run/secrets/bus_public_keys.json:ro
+      # - ./secrets/bus_seraphim.pem:/run/secrets/bus_seraphim.pem:ro
+      # - ./trust/approvers.json:/run/secrets/approvers.json:ro
+      # - ./trust/approvers.json.sig:/run/secrets/approvers.json.sig:ro
+      # - ./trust/approvers_public.hex:/run/secrets/approvers_public.hex:ro
+      # - ./trust/ed25519_public_keys.json:/run/secrets/ed25519_public_keys.json:ro
+      # - ./secrets/ed25519_private.pem:/run/secrets/ed25519_private.pem:ro
     ports:
       - "127.0.0.1:8080:8080"
     networks:
@@ -86,10 +114,30 @@ services:
       AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
       AGENT_APPROVERS: ${AGENT_APPROVERS:?set AGENT_APPROVERS in .env.docker}
       AGENT_LOG_JSON: "true"
+      # Production trust: this worker is `oekp`. Mount ONLY bus_oekp.pem here —
+      # never another coordinator's private key. Cluster-level signing uses a
+      # KMS sidecar so no shared private key sits on the worker.
+      # AGENT_STRICT_PROD: "1"
+      # AGENT_SIGNING_MODE: ed25519
+      # AGENT_ED25519_PUBLIC_KEYS_FILE: /run/secrets/ed25519_public_keys.json
+      # AGENT_KMS_SIGN_URL: http://kms-sidecar:8081/sign
+      # AGENT_BUS_PUBLIC_KEYS_FILE: /run/secrets/bus_public_keys.json
+      # AGENT_BUS_SIGNING_AGENT: oekp
+      # AGENT_BUS_SIGNING_KID: oekp-1
+      # AGENT_BUS_SIGNING_KEY_FILE: /run/secrets/bus_oekp.pem
+      # AGENT_APPROVER_REGISTRY_FILE: /run/secrets/approvers.json
+      # AGENT_APPROVER_REGISTRY_SIGNATURE_FILE: /run/secrets/approvers.json.sig
+      # AGENT_APPROVER_REGISTRY_PUBLIC_KEY_FILE: /run/secrets/approvers_public.hex
     secrets:
       - agent_shared_secret
     volumes:
       - mesh-data:/data
+      # - ./trust/bus_public_keys.json:/run/secrets/bus_public_keys.json:ro
+      # - ./secrets/bus_oekp.pem:/run/secrets/bus_oekp.pem:ro
+      # - ./trust/approvers.json:/run/secrets/approvers.json:ro
+      # - ./trust/approvers.json.sig:/run/secrets/approvers.json.sig:ro
+      # - ./trust/approvers_public.hex:/run/secrets/approvers_public.hex:ro
+      # - ./trust/ed25519_public_keys.json:/run/secrets/ed25519_public_keys.json:ro
     networks:
       - internal
       - egress
@@ -119,10 +167,29 @@ services:
       AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
       AGENT_APPROVERS: ${AGENT_APPROVERS:?set AGENT_APPROVERS in .env.docker}
       AGENT_LOG_JSON: "true"
+      # Production trust: this worker is `bengal`. Mount ONLY bus_bengal.pem
+      # here so it cannot publish as seraphim/hitl/oekp or a sibling worker.
+      # AGENT_STRICT_PROD: "1"
+      # AGENT_SIGNING_MODE: ed25519
+      # AGENT_ED25519_PUBLIC_KEYS_FILE: /run/secrets/ed25519_public_keys.json
+      # AGENT_KMS_SIGN_URL: http://kms-sidecar:8081/sign
+      # AGENT_BUS_PUBLIC_KEYS_FILE: /run/secrets/bus_public_keys.json
+      # AGENT_BUS_SIGNING_AGENT: bengal
+      # AGENT_BUS_SIGNING_KID: bengal-1
+      # AGENT_BUS_SIGNING_KEY_FILE: /run/secrets/bus_bengal.pem
+      # AGENT_APPROVER_REGISTRY_FILE: /run/secrets/approvers.json
+      # AGENT_APPROVER_REGISTRY_SIGNATURE_FILE: /run/secrets/approvers.json.sig
+      # AGENT_APPROVER_REGISTRY_PUBLIC_KEY_FILE: /run/secrets/approvers_public.hex
     secrets:
       - agent_shared_secret
     volumes:
       - mesh-data:/data
+      # - ./trust/bus_public_keys.json:/run/secrets/bus_public_keys.json:ro
+      # - ./secrets/bus_bengal.pem:/run/secrets/bus_bengal.pem:ro
+      # - ./trust/approvers.json:/run/secrets/approvers.json:ro
+      # - ./trust/approvers.json.sig:/run/secrets/approvers.json.sig:ro
+      # - ./trust/approvers_public.hex:/run/secrets/approvers_public.hex:ro
+      # - ./trust/ed25519_public_keys.json:/run/secrets/ed25519_public_keys.json:ro
     networks:
       - internal
       - egress

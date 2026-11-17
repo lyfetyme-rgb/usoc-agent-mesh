@@ -53,6 +53,11 @@ class ProposedAction(BaseModel):
     # came from and require the approval to disclose that taint.
     provenance: list[str] = Field(default_factory=list)
     tainted: bool = False
+    # FinOps/Banking: the exact transaction the human will be asked to approve.
+    amount: str | None = Field(default=None, max_length=40)
+    currency: str | None = Field(default=None, max_length=12)
+    # Clinical: PII/PHI labels detected in every contributing connector.
+    sensitive_labels: list[str] = Field(default_factory=list)
 
 
 class FragmentationReport(BaseModel):
@@ -144,6 +149,7 @@ class FragmentationService:
                 mission_id=mission_id,
                 classification=incident.classification.value,
                 correlation_id=incident.id,
+                tainted=incident.tainted,
             )
         return result
 
@@ -162,6 +168,9 @@ class FragmentationService:
             mission_id=mission_id,
             provenance=list(incident.sources),
             tainted=True,
+            amount=_money_from_signals(incident.signals, "amount"),
+            currency=_money_from_signals(incident.signals, "currency"),
+            sensitive_labels=_sensitive_labels(incident.signals),
         )
 
     async def authorize(
@@ -190,6 +199,8 @@ class FragmentationService:
                 correlation_id=action.incident_id,
                 provenance=action.provenance,
                 tainted=action.tainted,
+                amount=action.amount,
+                currency=action.currency,
             )
         await self._audit(
             "fragmentation.policy_decision",
@@ -205,10 +216,14 @@ class FragmentationService:
                 "reasons": decision.reasons,
                 "provenance": decision.provenance,
                 "tainted": decision.tainted,
+                "amount": action.amount,
+                "currency": action.currency,
+                "sensitive_labels": action.sensitive_labels,
             },
             mission_id=mission_id or action.mission_id,
             classification=action.classification.value,
             correlation_id=action.incident_id,
+            tainted=action.tainted,
         )
         return decision
 
@@ -249,6 +264,7 @@ class FragmentationService:
             mission_id=mission_id,
             classification=action.classification.value,
             correlation_id=top.id,
+            tainted=action.tainted,
         )
         decision = await self.authorize(
             action, mission_id=mission_id, approval_ref=approval_ref
@@ -280,6 +296,7 @@ class FragmentationService:
         mission_id: str | None = None,
         classification: str = "internal",
         correlation_id: str = "",
+        tainted: bool = False,
     ) -> str | None:
         if self.evidence is None:
             return None
@@ -291,9 +308,36 @@ class FragmentationService:
             mission_id=mission_id or self.settings.mission_id,
             classification=classification,
             data=data,
+            tainted=tainted,
         )
         self._evidence_refs.append(record.id)
         return record.id
+
+
+_AMOUNT_KEYS = ("amount", "transaction_amount", "wire_amount", "transfer_amount")
+_CURRENCY_KEYS = ("currency", "currency_code")
+
+
+def _money_from_signals(signals: list[Signal], kind: str) -> str | None:
+    """Extract the first well-formed amount/currency from connector attributes."""
+    keys = _AMOUNT_KEYS if kind == "amount" else _CURRENCY_KEYS
+    pattern = r"\d+(\.\d{1,4})?" if kind == "amount" else r"[A-Za-z]{3}"
+    for signal in signals:
+        for key in keys:
+            value = signal.attributes.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if re.fullmatch(pattern, text):
+                return text.upper() if kind == "currency" else text
+    return None
+
+
+def _sensitive_labels(signals: list[Signal]) -> list[str]:
+    labels: set[str] = set()
+    for signal in signals:
+        labels.update(getattr(signal, "sensitive_labels", []) or [])
+    return sorted(labels)
 
 
 def _containment_target(incident: CorrelatedIncident) -> str:

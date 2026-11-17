@@ -13,7 +13,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from .bus import Bus, acls_from_specs, build_bus
+from .bus import Bus, acls_from_specs, build_bus, topic_rules_from_authority
 from .config import Settings, get_settings
 from .connectors import IngestResult, load_connectors
 from .contracts import GoalResult
@@ -24,11 +24,18 @@ from .governance import ApprovalStore, FileApprovalStore, PolicyConfig, PolicyEn
 from .llm import EchoLLM, LLM, build_llm
 from .observability import Metrics, configure_logging, log
 from .orchestrator import LLMPlanner, Orchestrator, Planner, RouterPlanner
+from .profiles import apply_role_profile, get_profile, settings_for_profile
 from .registry import Registry, SubsystemSpec, load_registry
 from .runtime import SubsystemAgent
 from .security import SecurityError, Signer, build_signer, configured_approvers
 from .shell import Shell
 from .store import InMemoryStore, RedisStore, StateStore
+from .trust import (
+    CoordinatorKeyring,
+    build_approval_verifier,
+    build_message_authority,
+    load_approver_registry,
+)
 from .tools import ToolRegistry, build_default_tools, scoped_tool_registry
 from .usoc_agents import AiceeAgent, BengalAgent, HitlAgent, OekpAgent, SeraphimAgent
 
@@ -79,7 +86,7 @@ class Mesh:
         agents: list[str] | None = None,
         run_orchestrator: bool = True,
     ) -> None:
-        self.settings = settings or get_settings()
+        self.settings = settings_for_profile(settings or get_settings())
         self._registry_path = Path(registry_path or self.settings.subsystems_file)
         self._bus_override = bus
         self._llm_override = llm
@@ -99,6 +106,10 @@ class Mesh:
         self.policy: PolicyEngine | None = None
         self.evidence: EvidenceChain | None = None
         self.signer: Signer | None = None
+        self.message_authority: Signer | CoordinatorKeyring | None = None
+        self.approver_registry: Any | None = None
+        self.approver_verifier: Any | None = None
+        self.topic_rules: dict[str, Any] = {}
         self.agents: dict[str, SubsystemAgent] = {}
         # Per-agent registries. CSSSF gets a scoped registry; other agents keep
         # the base one so their workspace tools are not silently narrowed.
@@ -113,7 +124,18 @@ class Mesh:
     # -- lifecycle ----------------------------------------------------------
     async def start(self) -> "Mesh":
         configure_logging(self.settings.log_level, self.settings.log_json)
-        self.signer = build_signer(self.settings)
+        self.message_authority = build_message_authority(self.settings)
+        if isinstance(self.message_authority, CoordinatorKeyring):
+            # Bus keys are per-coordinator; evidence, approvals and ADRs keep
+            # the cluster-level signer so cross-process records still verify.
+            self.signer = build_signer(self.settings)
+        else:
+            # Dev/demo share one HMAC or global Ed25519 identity everywhere.
+            self.signer = self.message_authority
+        self.approver_registry = load_approver_registry(self.settings)
+        self.approver_verifier = build_approval_verifier(
+            self.settings, self.approver_registry
+        )
         self.evidence = EvidenceChain(self._workspace / "evidence" / "chain.jsonl", signer=self.signer)
         tools = build_default_tools(
             self._workspace,
@@ -121,21 +143,38 @@ class Mesh:
             allow_delete=self.settings.allow_workspace_delete,
         )
         self.registry = load_registry(self._registry_path, tools, settings=self.settings)
+        # The profile narrows role views only. Every coordinator stays running
+        # with the same signed card, ACLs and tool scopes as the full mesh.
+        self.registry = apply_role_profile(self.registry, self.settings.role_profile)
         validate_agent_tiers(self.registry.subsystems)
+        # Only the owning coordinator's key may emit control-plane verdicts and
+        # approval grants. In strict prod a missing kid fails startup closed.
+        self.topic_rules = topic_rules_from_authority(
+            self.message_authority, require_kid=self.settings.strict_prod
+        )
         if self._bus_override is not None:
             self.bus = self._bus_override
             # An injected bus (tests, custom transports) still gets message auth.
             if hasattr(self.bus, "signer"):
-                self.bus.signer = self.signer
+                self.bus.signer = self.message_authority
+            if hasattr(self.bus, "topic_rules"):
+                self.bus.topic_rules = self.topic_rules
         else:
             publish_acl, subscribe_acl = acls_from_specs(self.registry.subsystems)
             self.bus = build_bus(
                 self.settings,
-                signer=self.signer,
+                signer=self.message_authority,
                 publish_acl=publish_acl,
                 subscribe_acl=subscribe_acl,
+                topic_rules=self.topic_rules,
             )
-            log("bus.acl", mode="least-privilege", publish=len(publish_acl), subscribe=len(subscribe_acl))
+            log(
+                "bus.acl",
+                mode="least-privilege",
+                publish=len(publish_acl),
+                subscribe=len(subscribe_acl),
+                topic_rules=len(self.topic_rules),
+            )
         self.llm = self._llm_override or build_llm(self.settings)
         if self._store_override:
             self.store = self._store_override
@@ -147,17 +186,61 @@ class Mesh:
         else:
             self.store = InMemoryStore()
 
+        approvers = configured_approvers(self.settings)
+        if self.approver_registry is not None:
+            # The signed registry is authoritative; a configured plain name
+            # that is absent from it must never be able to approve.
+            approvers = (approvers & self.approver_registry.ids()) if approvers else self.approver_registry.ids()
         self.approvals = self._approvals_override or FileApprovalStore(
             self._workspace / "approvals.json",
             signer=self.signer,
-            approvers=configured_approvers(self.settings),
-            require_allowlist=self.settings.require_approver_allowlist,
+            approvers=approvers,
+            require_allowlist=self.settings.require_approver_allowlist
+            or self.settings.strict_prod,
             ttl_s=self.settings.approval_ttl_s,
+            approver_verifier=self.approver_verifier,
         )
         targets = [t.strip() for t in self.settings.allowed_targets.split(",") if t.strip()]
+
+        async def record_consumed_approval(request: Any, **context: Any) -> None:
+            # OEKP owns the evidence chain: a spent nonce is immutable proof
+            # that this approval can never authorise a second execution.
+            await self.evidence.append(
+                kind="approval.consumed",
+                actor="oekp",
+                subsystem="oekp",
+                correlation_id=str(context.get("correlation_id") or ""),
+                mission_id=context.get("mission_id"),
+                data={
+                    "approval_id": request.id,
+                    "nonce": request.nonce or request.id,
+                    "action_class": request.action_class.value,
+                    "target": request.target,
+                    "risk": request.risk.value,
+                    "taint_hash": request.taint_hash,
+                    "tainted": request.tainted,
+                    "provenance": list(context.get("provenance") or []),
+                    "amount": request.amount,
+                    "currency": request.currency,
+                    "quorum": request.quorum,
+                    "approvers": [d.approver for d in request.decisions],
+                },
+                tainted=request.tainted,
+            )
+
+        from .profiles import parse_amount
+
         self.policy = PolicyEngine(
-            PolicyConfig(allowed_targets=targets, approval_ttl_s=self.settings.approval_ttl_s),
+            PolicyConfig(
+                allowed_targets=targets,
+                approval_ttl_s=self.settings.approval_ttl_s,
+                max_transaction_amount=parse_amount(self.settings.max_transaction_amount),
+                transaction_currency=self.settings.transaction_currency,
+                approval_quorum=self.settings.approval_quorum,
+            ),
             self.approvals,
+            self.approver_registry,
+            consumption_audit=record_consumed_approval,
         )
 
         # Connectors are optional. A broken integration is reported by SHELL and
@@ -239,6 +322,7 @@ class Mesh:
             "mesh.started",
             agents=len(self.agents),
             roles=self.registry.roles_total,
+            profile=self.settings.role_profile,
             bus=type(self.bus).__name__,
             model=getattr(self.llm, "model", "?"),
             planner=type(self.orchestrator.planner).__name__ if self.orchestrator is not None else "disabled",
@@ -346,6 +430,8 @@ class Mesh:
         return {
             "agents": [spec.model_dump() for spec in self.registry.subsystems],
             "roles_total": self.registry.roles_total,
+            "role_profile": self.settings.role_profile,
+            "profile_name": get_profile(self.settings.role_profile).name,
             "metrics": self.metrics.snapshot(),
             "bus": type(self.bus).__name__ if self.bus else None,
             "model": getattr(self.llm, "model", None),

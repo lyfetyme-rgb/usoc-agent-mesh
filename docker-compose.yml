@@ -54,6 +54,26 @@ services:
       # Pin the capability cards; generate with `python -m agents integrity`.
       # AGENT_SUBSYSTEMS_MANIFEST_HASH: ${AGENT_SUBSYSTEMS_MANIFEST_HASH:-}
       # AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY: "true"
+      # --- Production trust (AGENT_STRICT_PROD=1) ----------------------------
+      # Uncomment as a group after provisioning the files below. Strict mode
+      # removes every dev fallback; `python -m agents doctor` must exit 0.
+      # Cluster-level approval/evidence signing (independent of bus keys):
+      # AGENT_STRICT_PROD: "1"
+      # AGENT_SIGNING_MODE: ed25519
+      # AGENT_ED25519_PUBLIC_KEYS_FILE: /run/secrets/ed25519_public_keys.json
+      # AGENT_ED25519_PRIVATE_KEY_FILE: /run/secrets/ed25519_private.pem
+      # Per-coordinator bus identity: this process is `seraphim`. Every node
+      # mounts bus_public_keys.json, but ONLY this node mounts seraphim.pem.
+      # AGENT_BUS_PUBLIC_KEYS_FILE: /run/secrets/bus_public_keys.json
+      # AGENT_BUS_SIGNING_AGENT: seraphim
+      # AGENT_BUS_SIGNING_KID: seraphim-1
+      # AGENT_BUS_SIGNING_KEY_FILE: /run/secrets/bus_seraphim.pem
+      # Signed approver registry + detached/OIDC human credentials:
+      # AGENT_APPROVER_REGISTRY_FILE: /run/secrets/approvers.json
+      # AGENT_APPROVER_REGISTRY_SIGNATURE_FILE: /run/secrets/approvers.json.sig
+      # AGENT_APPROVER_REGISTRY_PUBLIC_KEY_FILE: /run/secrets/approvers_public.hex
+      # AGENT_APPROVAL_CREDENTIAL_MODE: either
+      # AGENT_APPROVAL_REQUIRE_CREDENTIAL: "1"
       # Fail closed if the deployment forgets to name its approvers.
       AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
       AGENT_APPROVERS: ${AGENT_APPROVERS:?set AGENT_APPROVERS in .env.docker}
@@ -71,6 +91,15 @@ services:
       # connectors.yaml, review it, then uncomment both mounts:
       # - ./connectors.yaml:/app/connectors.yaml:ro
       # - ./fixtures:/app/fixtures:ro
+      # Strict-prod trust files (generated offline, mounted read-only). The
+      # private key below belongs to this node's AGENT_BUS_SIGNING_AGENT only:
+      # - ./trust/bus_public_keys.json:/run/secrets/bus_public_keys.json:ro
+      # - ./secrets/bus_seraphim.pem:/run/secrets/bus_seraphim.pem:ro
+      # - ./trust/approvers.json:/run/secrets/approvers.json:ro
+      # - ./trust/approvers.json.sig:/run/secrets/approvers.json.sig:ro
+      # - ./trust/approvers_public.hex:/run/secrets/approvers_public.hex:ro
+      # - ./trust/ed25519_public_keys.json:/run/secrets/ed25519_public_keys.json:ro
+      # - ./secrets/ed25519_private.pem:/run/secrets/ed25519_private.pem:ro
     # Keep the read-only health endpoint off every interface by default.
     ports:
       - "127.0.0.1:8080:8080"
@@ -113,3 +142,8 @@ secrets:
     file: ./secrets/agent_shared_secret.txt
   health_token:
     file: ./secrets/health_token.txt
+
+# Strict-prod keys are injected as read-only bind mounts (see `mesh.volumes`)
+# rather than Compose secrets so each worker receives only its own identity's
+# private key. If you prefer Compose secrets, declare one per coordinator and
+# mount that secret ONLY on the matching service.

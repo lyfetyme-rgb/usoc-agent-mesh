@@ -87,6 +87,10 @@ class TaskSpec(Strict):
     # whether any of it came from an untrusted source (telemetry, vendor payloads).
     provenance: list[str] = Field(default_factory=list, max_length=32)
     tainted: bool = False
+    # Optional monetary payload for governed work (FinOps/Banking pack). Stored
+    # as a canonical decimal string so wire JSON and signed approvals agree.
+    amount: str | None = Field(default=None, max_length=40, pattern=r"^\d+(\.\d{1,4})?$")
+    currency: str | None = Field(default=None, max_length=12, pattern=r"^[A-Z]{3}$")
 
 
 class Artifact(Strict):
@@ -180,7 +184,13 @@ class Message(Strict):
     policy_decision_ref: str | None = Field(default=None, max_length=100)
     authorization_ref: str | None = Field(default=None, max_length=100)
     evidence_ref: str | None = Field(default=None, max_length=100)
-    # HMAC-SHA256 over the canonical message, keyed by sender. Set by the bus.
+    # Signature metadata. These are covered by the signature (only ``signature``
+    # itself is excluded), so a message cannot be relabelled with another
+    # algorithm or key id without invalidating it.
+    signature_alg: str | None = Field(default=None, max_length=16)
+    signing_kid: str | None = Field(default=None, max_length=128)
+    # HMAC-SHA256 or Ed25519 over the canonical message, set by the bus. In
+    # per-coordinator mode the verifier selects the key by ``sender`` and kid.
     signature: str | None = Field(default=None, max_length=128)
 
     @model_validator(mode="after")

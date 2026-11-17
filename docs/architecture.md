@@ -245,6 +245,70 @@ stop the others or the nine agents. A malformed connectors file disables the
 fragmentation layer, and SHELL reports the error in `health()`/`diagnostics()`.
 The mesh itself stays ready because connectors are an optional integration.
 
+## 4b. Industry Starter Profiles and vertical controls
+
+Four buyer-facing packs are packaged on top of the same mesh:
+
+| profile id | pack | active roles | vertical controls |
+|---|---|---|---|
+| `core` | Core Governance Pack | 12 | baseline governance; JSONL evidence |
+| `finops_banking` | FinOps & Banking Pack | 24 | transaction ceiling, dual-approver quorum, OEKP/BENGAL exports |
+| `clinical_healthcare` | Clinical & Healthcare Pack | 22 | PII/PHI taint on every connector, signed egress guard |
+| `full_usoc` | Full USOC Defense & Critical Infrastructure Pack | 93 | all declared roles (default) |
+
+`agents/profiles.py` owns the exact role selections and validates them against
+the signed cards at import. `apply_role_profile()` narrows only each card's
+`roles` list; the nine coordinators, topic ACLs, tool scopes, tiers and message
+routing are unchanged. This is deliberate: a pack can show a buyer a smaller
+surface without creating a second, weaker execution path. Unknown profile ids
+fail closed, and profile control defaults are applied only when the matching
+explicit `AGENT_*` variable is unset.
+
+**FinOps & Banking.** `PolicyEngine.evaluate()` enforces
+`AGENT_MAX_TRANSACTION_AMOUNT` as a hard execution-time ceiling (strict parse:
+finite, non-negative, at most four decimal places). Amount and currency are
+bound into the approval request, so a re-dispatch with a different sum or a
+foreign currency is DENIED. `AGENT_APPROVAL_QUORUM=2` requires two distinct
+verified humans; a first decision stays `PENDING`, duplicates are rejected, and
+the execution gate rechecks every credential and `max_tier`.
+
+**Clinical & Healthcare.** `security.detect_sensitive_data()` runs on every
+connector record when `AGENT_PHI_DETECTION_ENABLED=true`. A positive label raises
+classification to `RESTRICTED`, sets monotone taint and attaches
+`sensitive_labels`, which survive correlation, the proposal, the approval
+`taint_hash` disclosure and evidence. `agents/egress.py` blocks external
+publication of tainted/restricted decisions unless a verified detached/OIDC
+sign-off covers the exact target (`AGENT_BLOCK_TAINTED_EGRESS=true`);
+`agents publish-decision <id> --signoff <approved-id>` supplies it.
+
+**Compliance exports.** `agents/evidence.py:render_export()` renders read-only
+`jsonl`, `oekp`, `bengal` and `oekp_bengal` views over the verified hash/MAC
+chain, failing closed when verification fails. The canonical store remains
+append-only JSONL.
+
+## 4c. Cross-vertical Money Shot storyboards
+
+`agents/storyboards.py` holds five-beat demos for three verticals. The shape is
+identical; only nouns change:
+
+1. messy signals
+2. entity resolution
+3. ranked risk
+4. proposed high-impact action
+5. **deterministic HOLD** (never autonomous execution)
+
+| vertical | money shot | profile | fixtures |
+|---|---|---|---|
+| cyber / infra | `Malicious IP signals -> CONTAIN prod-db-01 -> HOLD for SecOps lead` | `full_usoc` | `fixtures/fragmentation/` |
+| finance | `Anomalous wire pattern -> FREEZE merchant-account-884 -> HOLD for Risk Officer` | `finops_banking` | `fixtures/finance/` |
+| healthcare | `Conflicting medication/lab feed -> PAUSE automated-dispense-queue -> HOLD for Attending Clinician` | `clinical_healthcare` | `fixtures/healthcare/` |
+
+`agents storyboard --vertical <id>` prints the beats; `agents demo-fragmentation
+--vertical <id>` and `agents ingest --vertical <id>` swap profile, fixtures,
+target nouns and mission defaults in lockstep. Governed targets are namespaced
+(`sandbox/<noun>`) so a vendor field cannot widen the blast radius; the noun
+above is the buyer-facing label.
+
 ## 5. Evidence chain
 
 `agents/evidence.py` writes one JSON record per line:
@@ -378,7 +442,9 @@ to change.
   consequence, and no model output is treated as an authorization.
 * **Approvals are human.** HITL presents and records; it never self-approves.
 * **Execution is scoped.** Governed actions require an allowlisted target and a
-  matching, non-expired approval.
+  matching, non-expired approval. FinOps adds a hard transaction ceiling and
+  dual-approver quorum; Clinical adds PII/PHI taint classification and a signed
+  egress guard (see [§4b](#4b-industry-starter-profiles-and-vertical-controls)).
 * Workspace tools resolve paths and reject escapes from the workspace root.
 * Agent-to-agent messages are data, never instructions. A task result is
   untrusted input to the next agent: it is delivered as `inputs`.
@@ -501,6 +567,18 @@ The suite covers the invariants that break multi-agent systems:
 * fragmentation governance: HOLD, cross-process approval, mission scoping,
   fail-closed policy, safe target selection and evidence
 * AICEE deterministic correlated-incident summary
+* exact role counts for all four Starter Packs, fail-closed unknown profiles,
+  profile views never widening card ACLs, explicit `AGENT_*` overrides
+* strict money parsing, hard transaction ceiling, currency pinning, exact
+  amount/currency approval binding
+* dual-approver quorum: distinct humans, partial `PENDING`, single-approver
+  fallback
+* PII/PHI detection (keys and values), `MappingAdapter` reclassification to
+  `RESTRICTED`, monotone taint/label propagation through correlation
+* egress guard: verified detached/OIDC sign-off, target coverage, pending and
+  unverified rejections
+* all four export formats plus fail-closed verification
+* exact cross-vertical Money Shot mappings and shared five-beat shape
 
 Run with `python -m pytest -q`. Add a Redis integration job before deploying the
 Redis adapter.
@@ -513,11 +591,11 @@ governance to land before higher-risk autonomy.
 | deliverable | this repository | remaining work |
 |---|---|---|
 | A — Architecture inventory | `subsystems.yaml`, this document | connect and audit real USOC repositories |
-| B — Agent registry | 93 roles declared with tools/subscriptions; 9 runtime agents | per-role I/O contracts and permission matrix |
+| B — Agent registry | 93 roles declared with tools/subscriptions; 9 runtime agents; four Starter Pack role views | per-role I/O contracts and permission matrix |
 | C — Communication architecture | `contracts.py`, `bus.py`, this document | Protobuf/gRPC, authenticated service identity |
 | D — Implementation blueprint | package layout and composition root | service boundaries for role workers |
-| E — Security and governance | `governance.py`, `evidence.py`, `security.py`, `usoc_agents.py` | OPA/Rego, per-agent keys, signed authorization artifacts |
-| F — Test and verification | 206 passed + 1 symlink skip across contracts, bus, runtime, routing, governance, security, wave recovery, zero-trust tiers | integration, performance, fault-injection suites |
+| E — Security and governance | `governance.py`, `evidence.py`, `security.py`, `usoc_agents.py`, `egress.py`, `trust.py`, `oidc.py`, `profiles.py` | OPA/Rego, per-agent keys, signed authorization artifacts |
+| F — Test and verification | 274 passed + 1 symlink skip across contracts, bus, runtime, routing, governance, security, wave recovery, zero-trust tiers, role profiles and vertical controls | integration, performance, fault-injection suites |
 | G — Phased roadmap | phases below | resource and delivery schedule |
 | H — Operational readiness | `health` and diagnostics | evidence-backed maturity assessment per subsystem |
 
@@ -535,7 +613,10 @@ Phased plan:
    per-agent keys, OPA/Rego and signed authorization artifacts.
 5. **Role decomposition** — split OEKP/HITL/CYBER DEFENSE workers where isolation
    or load requires it; keep the rest as coordinator capabilities.
-6. **Full operational validation** — BENGAL acceptance suite, fault injection,
+6. **Buyer packaging** — four Industry Starter Profiles (role views only),
+   FinOps transaction/quorum controls, Clinical PII/PHI taint and signed egress,
+   OEKP/BENGAL exports and cross-vertical Money Shot storyboards. *Done.*
+7. **Full operational validation** — BENGAL acceptance suite, fault injection,
    tenant isolation, performance and security evidence.
 
 A subsystem is not production-ready because source code exists. Each phase needs

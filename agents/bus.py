@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Any, Protocol, runtime_checkable
 
@@ -35,6 +36,79 @@ STREAM_PREFIX = "mesh:"
 CONTROL_PLANE_AGENTS = frozenset({"orchestrator"})
 AUDIT_SINK_AGENTS = frozenset({"oekp"})
 WILDCARD_CHARS = ("*", "?", "[")
+
+# Control-plane broadcasts that must never be forged by a sibling worker.
+POLICY_VERDICT_TOPIC = "policy.verdict"
+APPROVAL_GRANTED_TOPIC = "approval.granted"
+RESTRICTED_TOPIC_SENDERS: dict[str, frozenset[str]] = {
+    POLICY_VERDICT_TOPIC: frozenset({"seraphim"}),
+    APPROVAL_GRANTED_TOPIC: frozenset({"hitl"}),
+}
+
+
+@dataclass(frozen=True)
+class TopicRule:
+    """A topic whose publisher is pinned to an identity and optionally a key id."""
+
+    topic: str
+    senders: frozenset[str]
+    kids: frozenset[str] = frozenset()
+
+
+def topic_rules_from_authority(
+    authority: Any, *, require_kid: bool = False
+) -> dict[str, TopicRule]:
+    """Derive restricted-topic rules from the mounted message authority.
+
+    A ``CoordinatorKeyring`` exposes the trusted per-sender public keyset, so we
+    can pin the exact kid allowed to emit a control-plane verdict. A shared dev
+    signer has no per-sender keys; production (``require_kid``) refuses to start
+    without them.
+    """
+    public = getattr(authority, "public", None)
+    rules: dict[str, TopicRule] = {}
+    for topic, senders in RESTRICTED_TOPIC_SENDERS.items():
+        kids: set[str] = set()
+        if isinstance(public, dict):
+            for sender in senders:
+                keys = public.get(sender)
+                if keys is None:
+                    continue
+                mapping = getattr(keys, "keys", None)
+                if isinstance(mapping, dict):
+                    kids.update(str(k) for k in mapping)
+                elif isinstance(keys, dict):
+                    kids.update(str(k) for k in keys)
+        if require_kid and not kids:
+            raise ConfigurationError(
+                f"strict production requires a managed signing kid for {topic!r} "
+                f"(allowed senders: {', '.join(sorted(senders))})"
+            )
+        rules[topic] = TopicRule(topic, senders, frozenset(kids))
+    return rules
+
+
+def topic_rule_denial(
+    msg: Message,
+    rules: dict[str, TopicRule] | None,
+    *,
+    check_kid: bool = True,
+) -> str | None:
+    """Return a denial reason, or ``None`` when the message may be published."""
+    rule = (rules or {}).get(msg.topic)
+    if rule is None:
+        return None
+    if msg.sender not in rule.senders:
+        return (
+            f"{msg.sender!r} may not publish {msg.topic!r}; "
+            f"allowed: {', '.join(sorted(rule.senders))}"
+        )
+    if check_kid and rule.kids and msg.signing_kid not in rule.kids:
+        return (
+            f"signing kid {msg.signing_kid!r} is not trusted for {msg.topic!r}; "
+            f"allowed: {', '.join(sorted(rule.kids))}"
+        )
+    return None
 
 
 class ConfigurationError(ValueError):
@@ -115,6 +189,13 @@ def acls_from_specs(
         topics = {f"inbox.{r}" for r in recipients if r in ids or r in control_agents}
         publish[str(spec.id)] = sorted(topics)
         subscribe[str(spec.id)] = [str(t) for t in (getattr(spec, "subscribes", None) or [])]
+    # Control-plane broadcasts are enumerated explicitly; the topic rules below
+    # further pin them to the owning agent's key id.
+    for topic, senders in RESTRICTED_TOPIC_SENDERS.items():
+        for sender in senders:
+            allowed = publish.setdefault(sender, [])
+            if topic not in allowed:
+                allowed.append(topic)
     for control in control_agents:
         publish[control] = sorted({f"inbox.{agent}" for agent in ids | {control}} | {"topic.plan", "topic.goal"})
         subscribe.setdefault(control, [])
@@ -160,6 +241,7 @@ class InMemoryBus:
         subscribe_acl: dict[str, list[str]] | None = None,
         insecure_dev_mode: bool = False,
         sender_verifier: Any = None,
+        topic_rules: dict[str, TopicRule] | None = None,
     ) -> None:
         self._queues: dict[str, asyncio.Queue[Message]] = {}
         self._patterns: dict[str, list[str]] = defaultdict(list)
@@ -169,6 +251,7 @@ class InMemoryBus:
         self.subscribe_acl = subscribe_acl
         self.insecure_dev_mode = insecure_dev_mode
         self.sender_verifier = sender_verifier
+        self.topic_rules = topic_rules or {}
         validate_topic_acls(
             publish_acl=publish_acl,
             subscribe_acl=subscribe_acl,
@@ -220,6 +303,12 @@ class InMemoryBus:
                 raise PermissionError(f"{msg.sender} is not allowed to publish to {msg.topic}")
         if self.signer is not None:
             msg = self.signer.sign_message(msg)
+        # Check after signing: only the trusted keyring can set signing_kid.
+        denial = topic_rule_denial(msg, self.topic_rules)
+        if denial:
+            self.stats["acl_denied"] += 1
+            log("bus.acl_denied", sender=msg.sender, topic=msg.topic, reason=denial)
+            raise PermissionError(denial)
         self.history.append(msg)
         self.stats["published"] += 1
         targets = self._subscribers(msg.topic)
@@ -259,10 +348,21 @@ class InMemoryBus:
                 except (asyncio.TimeoutError, TimeoutError):
                     return None
             if self.signer is None:
-                return msg
+                denial = topic_rule_denial(msg, self.topic_rules)
+                if denial is None:
+                    return msg
+                self.stats["rejected"] += 1
+                self.dlq.append(msg)
+                log("bus.rejected", agent=agent, reason=denial, sender=msg.sender, topic=msg.topic)
+                if timeout <= 0:
+                    return None
+                continue
             ok, detail = self.signer.verify_message(msg)
             if ok:
-                return msg
+                denial = topic_rule_denial(msg, self.topic_rules)
+                if denial is None:
+                    return msg
+                detail = denial
             self.stats["rejected"] += 1
             self.dlq.append(msg)
             log("bus.rejected", agent=agent, reason=detail, sender=msg.sender, topic=msg.topic)
@@ -313,6 +413,7 @@ class RedisBus:
         subscribe_acl: dict[str, list[str]] | None = None,
         insecure_dev_mode: bool = False,
         sender_verifier: Any = None,
+        topic_rules: dict[str, TopicRule] | None = None,
     ) -> None:
         import redis.asyncio as aioredis
 
@@ -334,6 +435,7 @@ class RedisBus:
         self.subscribe_acl = subscribe_acl
         self.insecure_dev_mode = insecure_dev_mode
         self.sender_verifier = sender_verifier
+        self.topic_rules = topic_rules or {}
         validate_topic_acls(
             publish_acl=publish_acl,
             subscribe_acl=subscribe_acl,
@@ -401,6 +503,11 @@ class RedisBus:
                 raise PermissionError(f"{msg.sender} is not allowed to publish to {msg.topic}")
         if self.signer is not None:
             msg = self.signer.sign_message(msg)
+        denial = topic_rule_denial(msg, self.topic_rules)
+        if denial:
+            self.stats["acl_denied"] += 1
+            log("bus.acl_denied", sender=msg.sender, topic=msg.topic, reason=denial)
+            raise PermissionError(denial)
         self._history.append(msg)
         self.stats["published"] += 1
         await self._redis.xadd(
@@ -452,6 +559,20 @@ class RedisBus:
                     self.stats["rejected"] += 1
                     log("bus.rejected", agent=agent, reason=detail, sender=msg.sender, topic=msg.topic)
                     continue
+            denial = topic_rule_denial(msg, self.topic_rules)
+            if denial:
+                # A worker can bypass publish checks by writing the stream
+                # directly. Quarantine on consume using verified metadata.
+                await self._redis.xack(stream, group, raw_id)
+                await self._redis.xadd(
+                    self.dlq_stream,
+                    {"msg": msg.model_dump_json(), "reason": denial},
+                    maxlen=self._maxlen,
+                    approximate=True,
+                )
+                self.stats["rejected"] += 1
+                log("bus.rejected", agent=agent, reason=denial, sender=msg.sender, topic=msg.topic)
+                continue
             # Broker id is needed to ack later; key it by message id.
             self._inflight[msg.id] = raw_id
             self.stats["delivered"] += 1
@@ -547,6 +668,7 @@ def build_bus(
     subscribe_acl: dict[str, list[str]] | None = None,
     insecure_dev_mode: bool = False,
     sender_verifier: Any = None,
+    topic_rules: dict[str, TopicRule] | None = None,
 ) -> Bus:
     if publish_acl is None and subscribe_acl is None and not insecure_dev_mode:
         raise ConfigurationError(
@@ -564,6 +686,7 @@ def build_bus(
             subscribe_acl=subscribe_acl,
             insecure_dev_mode=insecure_dev_mode,
             sender_verifier=sender_verifier,
+            topic_rules=topic_rules,
         )
     return InMemoryBus(
         signer=signer,
@@ -571,4 +694,5 @@ def build_bus(
         subscribe_acl=subscribe_acl,
         insecure_dev_mode=insecure_dev_mode,
         sender_verifier=sender_verifier,
+        topic_rules=topic_rules,
     )

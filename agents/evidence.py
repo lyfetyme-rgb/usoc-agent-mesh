@@ -34,6 +34,12 @@ class EvidenceRecord(BaseModel):
     classification: str = "internal"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     data: dict[str, Any] = Field(default_factory=dict)
+    # Provenance travels with the record so BENGAL can tell a real execution
+    # proof from a CSSSF rehearsal. These fields are covered by the hash/MAC.
+    provenance: list[str] = Field(default_factory=list, max_length=32)
+    origin: str | None = Field(default=None, max_length=128)
+    tainted: bool = False
+    rehearsal_only: bool = False
     prev_hash: str = "genesis"
     hash: str = ""
     # Keyed MAC over the record. Hash chains detect edits; the MAC makes them
@@ -46,6 +52,129 @@ class EvidenceRecord(BaseModel):
         body = self.model_dump(mode="json", exclude={"hash", "mac"})
         blob = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(blob).hexdigest()
+
+
+# Compliance export formats. The canonical store stays append-only JSONL;
+# these are read-only renderings over the verified chain, never a second source
+# of truth. Adding a format here makes it available to `agents export`.
+EXPORT_FORMATS = frozenset({"jsonl", "oekp", "bengal", "oekp_bengal"})
+
+
+def render_export(
+    records: list[EvidenceRecord],
+    fmt: str,
+    *,
+    verified: bool = True,
+    detail: str = "",
+) -> str:
+    """Render verified evidence for OEKP/BENGAL consumers.
+
+    ``fmt`` is validated against ``EXPORT_FORMATS`` and fails closed. The
+    operator can pass several formats from settings; each is rendered by a
+    separate call so one bad format cannot taint the others.
+    """
+    if fmt not in EXPORT_FORMATS:
+        raise ValueError(
+            f"unknown evidence export format {fmt!r}; choose from {', '.join(sorted(EXPORT_FORMATS))}"
+        )
+    if fmt == "jsonl":
+        return "".join(record.model_dump_json() + "\n" for record in records)
+
+    dumped = [record.model_dump(mode="json") for record in records]
+    head = dumped[-1] if dumped else None
+    oekp = {
+        "format": "oekp-compliance/v1",
+        "chain": {
+            "records": len(dumped),
+            "head_seq": head["seq"] if head else 0,
+            "head_hash": head["hash"] if head else "genesis",
+            "verified": bool(verified),
+            "verification_detail": detail,
+        },
+        "records": [
+            {
+                key: record[key]
+                for key in (
+                    "seq",
+                    "id",
+                    "kind",
+                    "actor",
+                    "subsystem",
+                    "correlation_id",
+                    "mission_id",
+                    "classification",
+                    "created_at",
+                    "provenance",
+                    "origin",
+                    "tainted",
+                    "rehearsal_only",
+                    "data",
+                    "prev_hash",
+                    "hash",
+                    "mac",
+                )
+            }
+            for record in dumped
+        ],
+    }
+    if fmt == "oekp":
+        return json.dumps(oekp, indent=2, sort_keys=True) + "\n"
+
+    def _counts(key: str) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for record in records:
+            name = str(getattr(record, key) or "unknown")
+            out[name] = out.get(name, 0) + 1
+        return dict(sorted(out.items()))
+
+    rehearsal = sum(1 for r in records if r.rehearsal_only or sandbox_origin(
+        origin=r.origin, provenance=r.provenance, sender=r.subsystem
+    ))
+    bengal = {
+        "format": "bengal-assurance/v1",
+        "assurance": "PASS" if verified else "FAIL",
+        "verification_detail": detail,
+        "totals": {
+            "records": len(records),
+            "tainted": sum(1 for r in records if r.tainted),
+            "restricted": sum(1 for r in records if r.classification == "restricted"),
+            "rehearsal_or_sandbox": rehearsal,
+        },
+        "by_kind": _counts("kind"),
+        "by_actor": _counts("actor"),
+        "by_subsystem": _counts("subsystem"),
+        "chain_head": {
+            "seq": head["seq"] if head else 0,
+            "hash": head["hash"] if head else "genesis",
+        },
+    }
+    if fmt == "bengal":
+        return json.dumps(bengal, indent=2, sort_keys=True) + "\n"
+    return json.dumps({"format": "usoc-compliance/v1", "oekp": oekp, "bengal": bengal}, indent=2, sort_keys=True) + "\n"
+
+
+SANDBOX_ORIGINS = frozenset({"csssf", "csssf:sandbox", "sandbox", "rehearsal"})
+
+
+def sandbox_origin(
+    *, origin: str | None, provenance: list[str] | None, sender: str | None = None
+) -> bool:
+    """True when a record's provenance originates from the CSSSF sandbox.
+
+    ``origin`` is stamped from the authenticated message sender (not from task
+    inputs), so an attacker cannot relabel a sandbox artifact as production
+    evidence by editing the payload.
+    """
+    labels = {str(origin or "").strip().lower(), str(sender or "").strip().lower()}
+    labels |= {str(p).strip().lower() for p in (provenance or [])}
+    return any(
+        label in SANDBOX_ORIGINS
+        or label.startswith("csssf:")
+        or label.startswith("sandbox/")
+        or "rehearsal" in label
+        for label in labels
+        if label
+    )
 
 
 class EvidenceChain:
@@ -106,6 +235,10 @@ class EvidenceChain:
         subsystem: str | None = None,
         mission_id: str | None = None,
         classification: str = "internal",
+        provenance: list[str] | None = None,
+        origin: str | None = None,
+        tainted: bool = False,
+        rehearsal_only: bool = False,
     ) -> EvidenceRecord:
         async with self._lock:
             self._load()
@@ -126,6 +259,10 @@ class EvidenceChain:
                     mission_id=mission_id,
                     classification=classification,
                     data=data or {},
+                    provenance=list(provenance or []),
+                    origin=origin,
+                    tainted=bool(tainted),
+                    rehearsal_only=bool(rehearsal_only),
                     prev_hash=self._last_hash,
                 )
                 record.hash = record.compute_hash()

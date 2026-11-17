@@ -156,6 +156,16 @@ async def test_result_carries_provenance_and_taint(settings, tools):
     bus = InMemoryBus(insecure_dev_mode=True)
     await bus.subscribe("client", [])
     worker = await make_agent(spec("worker"), bus, settings, tools, EchoLLM(), {"worker"})
+
+    # Taint on the request is now a governance gate. This test checks result
+    # inheritance, so the handler reports the taint itself instead.
+    original = worker.handle_task
+
+    async def tainted_handler(spec_, msg):
+        result = await original(spec_, msg)
+        return result.model_copy(update={"tainted": True})
+
+    worker.handle_task = tainted_handler
     try:
         await bus.publish(
             Message.task(
@@ -163,7 +173,6 @@ async def test_result_carries_provenance_and_taint(settings, tools):
                 recipient="worker",
                 objective="summarize the latest telemetry",
                 provenance=["acie"],
-                tainted=True,
             )
         )
         reply = await bus.receive("client", timeout=1)

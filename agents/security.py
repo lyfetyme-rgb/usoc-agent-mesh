@@ -167,6 +167,57 @@ def build_signer(settings: Any) -> Signer | None:
     return Signer(secret, max_age_s=int(getattr(settings, "max_message_age_s", 0) or 0))
 
 
+def is_ephemeral_secret(settings: Any) -> bool:
+    """True when message/approval signing rests on an in-memory random key.
+
+    Health checks use this to fail closed in production: an ephemeral key makes
+    approvals written by another process unverifiable, so an operator must never
+    mistake a "ready" result for a durable trust root.
+    """
+    if not getattr(settings, "message_auth", True):
+        return True
+    mode = str(getattr(settings, "signing_mode", "hmac") or "hmac").lower()
+    if mode == "ed25519":
+        # No shared secret is used at all, and build_ed25519_signer requires an
+        # explicitly configured key set, so this is never an ephemeral value.
+        return False
+    if getattr(settings, "bus", "memory") == "redis":
+        # A missing secret fails closed at startup for Redis instead of being
+        # silently replaced with a random value.
+        return False
+    return not (
+        getattr(settings, "shared_secret", None)
+        or getattr(settings, "shared_secret_file", None)
+    )
+
+
+def uses_managed_secrets(settings: Any) -> bool:
+    """True when key material comes from mounted files/KMS, not inline values.
+
+    ``AGENT_STRICT_PROD`` requires this so secrets injected by a secret manager
+    are not accidentally pasted into env files, process listings or logs.
+    """
+    mode = str(getattr(settings, "signing_mode", "hmac") or "hmac").lower()
+    if mode == "ed25519":
+        public_inline = bool(
+            getattr(settings, "ed25519_public_keys", None)
+            or getattr(settings, "ed25519_public_key", None)
+        )
+        public_file = bool(
+            getattr(settings, "ed25519_public_keys_file", None)
+            or getattr(settings, "ed25519_public_key_file", None)
+        )
+        private_inline = bool(getattr(settings, "ed25519_private_key", None))
+        private_file = bool(getattr(settings, "ed25519_private_key_file", None))
+        kms = bool(getattr(settings, "kms_sign_url", None))
+        if public_inline or private_inline or not public_file:
+            return False
+        return bool(private_file or kms)
+    return bool(getattr(settings, "shared_secret_file", None)) and not bool(
+        getattr(settings, "shared_secret", None)
+    )
+
+
 # -- redaction --------------------------------------------------------------
 def redact_text(value: str) -> str:
     import unicodedata
@@ -198,6 +249,67 @@ def _is_sensitive_key(key: Any) -> bool:
             normalized,
         )
     )
+
+
+# Clinical/PII detection. Key matches are conservative word-boundary checks on
+# normalized names; value matches catch direct identifiers even when a vendor
+# uses a generic key such as ``note``. Detection is opt-in per profile so a
+# cyber telemetry feed is not misclassified as patient data.
+_PHI_KEY = re.compile(
+    r"(?:^|[_-])(?:mrn|medical_record|health_record|patient|diagnos(?:is|e)|"
+    r"medication|prescription|lab_result|lab|icd10|icd_10|phi|nhs_number|"
+    r"treatment|clinical|discharge|admission)(?:$|[_-])"
+)
+_PII_KEY = re.compile(
+    r"(?:^|[_-])(?:email|e_mail|phone|mobile|address|full_name|first_name|"
+    r"last_name|dob|date_of_birth|ssn|social_security|passport|driver_license|"
+    r"national_id|tax_id|patient_id|insurance_id)(?:$|[_-])"
+)
+_PII_VALUE = {
+    "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+    "email": re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),
+    "phone": re.compile(r"(?<!\w)(?:\+\d{1,3}[ -]?)?\(?\d{3}\)?[ -]\d{3}[ -]\d{4}(?!\w)"),
+    "mrn": re.compile(r"\b(?:mrn|medical[-_ ]?record)[:# ]*\d{4,}\b", re.IGNORECASE),
+    "dob": re.compile(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b"),
+}
+
+
+def detect_sensitive_data(fields: dict[str, Any], *, enabled: bool = False) -> list[str]:
+    """Return sorted PII/PHI labels present in a connector record.
+
+    This is a *classification* signal, not a redaction substitute: the values
+    still flow through ``redact_fields`` first. A positive result marks the
+    connector's signal tainted and restricted, which forces mandatory HITL and
+    blocks egress until a signed sign-off is supplied.
+    """
+    if not enabled:
+        return []
+    labels: set[str] = set()
+
+    def visit(key: str, value: Any) -> None:
+        normalized = _normalize_key(key)
+        if _PHI_KEY.search(normalized):
+            labels.add("phi")
+        if _PII_KEY.search(normalized):
+            labels.add("pii")
+        if isinstance(value, str):
+            for name, pattern in _PII_VALUE.items():
+                if pattern.search(value):
+                    labels.add(name)
+        elif isinstance(value, dict):
+            for child_key, child_value in value.items():
+                visit(str(child_key), child_value)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                if isinstance(child, dict):
+                    for child_key, child_value in child.items():
+                        visit(str(child_key), child_value)
+                elif isinstance(child, str):
+                    visit(key, child)
+
+    for key, value in fields.items():
+        visit(str(key), value)
+    return sorted(labels)
 
 
 def redact_fields(fields: dict[str, Any]) -> dict[str, Any]:

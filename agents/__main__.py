@@ -1,19 +1,26 @@
-"""CLI: python -m agents {demo,list,doctor,integrity,keygen,sign-config,serve,worker,scale-advice,probe,health,approvals,approve,deny,publish-decision,ingest,demo-fragmentation}
+"""CLI: python -m agents {demo,list,profiles,storyboard,export,doctor,integrity,keygen,sign-config,sign-approvers,approval-payload,serve,worker,scale-advice,probe,health,approvals,approve,deny,publish-decision,ingest,demo-fragmentation}
 
     python -m agents demo "Collect edge telemetry, analyse anomalies, record evidence"
     python -m agents list
+    python -m agents profiles                       # 4 Industry Starter Packs and role counts
+    python -m agents --profile finops_banking list  # narrow the capability-card role view
+    python -m agents storyboard --vertical finance  # 3-minute Money Shot storyboard
+    python -m agents export --format oekp_bengal --output exports/
     python -m agents doctor
     python -m agents integrity
     python -m agents keygen --private-key-file secrets/ed25519_private.pem --public-key-file trust/ed25519_public.hex
     python -m agents sign-config --key-file secrets/ed25519_private.pem
+    python -m agents sign-approvers --registry-file trust/approvers.json --key-file secrets/approver_signing.pem
     python -m agents serve --host 127.0.0.1 --port 8080
     python -m agents probe --url http://127.0.0.1:8080/ready
     python -m agents health
     python -m agents approvals
-    python -m agents approve apr-1234 --by alice
-    python -m agents publish-decision apr-1234
+    python -m agents approval-payload apr-1234 --by alice --approve
+    python -m agents approve apr-1234 --by alice --signature-file /run/secrets/alice.sig
+    python -m agents approve apr-1234 --by alice --id-token-file /run/secrets/alice.idtoken
+    python -m agents publish-decision apr-1234 --signoff apr-5678
     python -m agents ingest --fixtures fixtures/fragmentation
-    python -m agents demo-fragmentation --fixtures fixtures/fragmentation
+    python -m agents demo-fragmentation --vertical healthcare
 """
 
 from __future__ import annotations
@@ -27,19 +34,36 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
+from .bus import ConfigurationError as BusConfigurationError
+from .bus import topic_rules_from_authority
 from .config import Settings, get_settings, subsystems_integrity, verify_subsystems_file
 from .evidence import EvidenceChain
-from .governance import FileApprovalStore
+from .governance import ApprovalCredential, FileApprovalStore
+from .profiles import (
+    PROFILES,
+    apply_role_profile,
+    get_profile,
+    settings_for_profile,
+)
 from .registry import RegistryError, load_registry
 from .security import (
     SecurityError,
     build_signer,
     configured_approvers,
+    is_ephemeral_secret,
     read_secret,
     redact_fields,
     redact_url,
 )
 from .tools import build_default_tools
+from .trust import (
+    CoordinatorKeyring,
+    approval_credential_payload,
+    build_approval_verifier,
+    build_message_authority,
+    load_approver_registry,
+    validate_strict_prod,
+)
 
 DEFAULT_GOAL = (
     "Collect edge telemetry from the cluster, analyse anomalies in the workload data, "
@@ -59,7 +83,10 @@ def _settings(args: argparse.Namespace) -> Settings:
         overrides["connectors_file"] = Path(args.connectors)
     if getattr(args, "json_logs", False):
         overrides["log_json"] = True
-    return base.model_copy(update=overrides) if overrides else base
+    if getattr(args, "profile", None):
+        overrides["role_profile"] = args.profile
+    settings = base.model_copy(update=overrides) if overrides else base
+    return settings_for_profile(settings)
 
 
 def _signer(settings: Settings):
@@ -74,7 +101,10 @@ def _registry(settings: Settings):
         evidence,
         allow_delete=settings.allow_workspace_delete,
     )
-    return load_registry(settings.subsystems_file, tools, settings=settings)
+    return apply_role_profile(
+        load_registry(settings.subsystems_file, tools, settings=settings),
+        settings.role_profile,
+    )
 
 
 def _seed_workspace(settings: Settings) -> Path:
@@ -120,13 +150,100 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_profiles(args: argparse.Namespace) -> int:
+    """List the shipped Starter Profiles and their exact active-role counts."""
+    settings = _settings(args)
+    registry = _registry(settings)
+    available = sorted(PROFILES)
+    for profile_id in available:
+        profile = get_profile(profile_id)
+        marker = "*" if profile_id == settings.role_profile else " "
+        view = apply_role_profile(registry, profile_id)
+        print(
+            f"{marker} {profile.id:<20} {profile.name:<48} "
+            f"{view.roles_total:>2} roles / {len(view)} coordinators"
+        )
+        print(f"    {profile.description}")
+        controls = ", ".join(f"{k}={v}" for k, v in profile.controls.items()) or "none"
+        print(f"    controls: {controls}")
+    print(f"\n* active profile (AGENT_ROLE_PROFILE={settings.role_profile})")
+    print("All nine coordinators run under every profile; only role views are filtered.")
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Render the verified evidence chain in OEKP/BENGAL compliance formats."""
+    from .evidence import EXPORT_FORMATS, render_export
+
+    settings = _settings(args)
+    signer = _signer(settings)
+    chain = EvidenceChain(settings.workspace / "evidence" / "chain.jsonl", signer=signer)
+    ok, detail = chain.verify()
+    if not ok:
+        print(f"evidence chain is not verifiable: {detail}", file=sys.stderr)
+        return 1
+    formats = (
+        [args.format]
+        if getattr(args, "format", None)
+        else [p.strip() for p in settings.evidence_export_formats.split(",") if p.strip()]
+    )
+    unknown = [fmt for fmt in formats if fmt not in EXPORT_FORMATS]
+    if unknown:
+        print(
+            f"unknown export format(s): {', '.join(unknown)}; "
+            f"choose from {', '.join(sorted(EXPORT_FORMATS))}",
+            file=sys.stderr,
+        )
+        return 1
+    records = chain.records()
+    payloads = [(fmt, render_export(records, fmt, verified=ok, detail=detail)) for fmt in formats]
+    if getattr(args, "output", None):
+        out_dir = Path(args.output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for fmt, payload in payloads:
+            path = out_dir / f"evidence.{fmt.replace('_', '-')}.{'json' if fmt != 'jsonl' else 'jsonl'}"
+            path.write_text(payload, encoding="utf-8")
+            print(f"wrote {path}")
+        return 0
+    for fmt, payload in payloads:
+        print(f"--- {fmt} ---")
+        sys.stdout.write(payload)
+    return 0
+
+
+def cmd_storyboard(args: argparse.Namespace) -> int:
+    """Print the 3-minute Money Shot storyboard for one vertical (or all)."""
+    from .storyboards import STORYBOARDS, get_storyboard, render_storyboard
+
+    vertical = getattr(args, "vertical", None)
+    if vertical == "all" or not vertical:
+        boards = list(STORYBOARDS.values())
+    else:
+        try:
+            boards = [get_storyboard(vertical)]
+        except RegistryError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    for index, board in enumerate(boards):
+        if index:
+            print("\n" + "=" * 78 + "\n")
+        print(render_storyboard(board.id))
+    return 0
+
+
 def _approval_store(settings: Settings, signer=None) -> FileApprovalStore:
+    registry = load_approver_registry(settings)
+    verifier = build_approval_verifier(settings, registry)
+    approvers = configured_approvers(settings)
+    if registry is not None:
+        approvers = (approvers & registry.ids()) if approvers else registry.ids()
     return FileApprovalStore(
         settings.workspace / "approvals.json",
         signer=signer,
-        approvers=configured_approvers(settings),
-        require_allowlist=settings.require_approver_allowlist,
+        approvers=approvers,
+        require_allowlist=settings.require_approver_allowlist or settings.strict_prod,
         ttl_s=settings.approval_ttl_s,
+        approver_verifier=verifier,
     )
 
 
@@ -138,7 +255,7 @@ def cmd_approvals(args: argparse.Namespace) -> int:
     if store.rejected:
         print(
             f"[warn] {store.rejected} approval record(s) failed signature verification; "
-            "set AGENT_SHARED_SECRET to the same value the mesh uses",
+            "check AGENT_SHARED_SECRET or the configured Ed25519 trust keys",
             file=sys.stderr,
         )
     if not pending:
@@ -146,9 +263,57 @@ def cmd_approvals(args: argparse.Namespace) -> int:
         return 0
     for req in pending:
         print(f"{req.id}  {req.action_class.value:<8} {req.target or '-':<28} risk={req.risk.value} by={req.requested_by}")
+        if req.quorum > 1:
+            print(f"  quorum: {len(req.decisions)}/{req.quorum} distinct approvers")
+        if req.amount:
+            print(f"  transaction: {req.amount} {req.currency}")
         if req.justification:
             print(f"  {req.justification}")
     return 0
+
+
+def _credential_from_args(args: argparse.Namespace) -> ApprovalCredential | None:
+    """Read the human's detached signature or id_token from a flag or file."""
+    signature = getattr(args, "signature", None)
+    signature_file = getattr(args, "signature_file", None)
+    id_token = getattr(args, "id_token", None)
+    id_token_file = getattr(args, "id_token_file", None)
+    if signature or signature_file:
+        value = signature
+        if value is None:
+            try:
+                value = Path(signature_file).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise SecurityError(f"cannot read --signature-file: {exc}") from exc
+        return ApprovalCredential(kind="detached", signature=value.strip())
+    if id_token or id_token_file:
+        value = id_token
+        if value is None:
+            try:
+                value = Path(id_token_file).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise SecurityError(f"cannot read --id-token-file: {exc}") from exc
+        return ApprovalCredential(kind="oidc", id_token=value.strip())
+    return None
+
+
+def _log_verification_failure(settings: Settings, signer, args: argparse.Namespace, detail: str) -> None:
+    """Record a rejected credential so OEKP shows failed verification attempts."""
+    chain = EvidenceChain(settings.workspace / "evidence" / "chain.jsonl", signer=signer)
+
+    async def run():
+        await chain.append(
+            kind="approval.verification",
+            actor=args.by,
+            subsystem="hitl",
+            data={
+                "approval_id": args.approval_id,
+                "verified": False,
+                "detail": detail,
+            },
+        )
+
+    asyncio.run(run())
 
 
 def _decide(args: argparse.Namespace, approved: bool) -> int:
@@ -158,9 +323,21 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
 
     async def run():
         req = await store.decide(
-            args.approval_id, approved=approved, approver=args.by, note=args.note
+            args.approval_id,
+            approved=approved,
+            approver=args.by,
+            note=args.note,
+            credential=_credential_from_args(args),
         )
         chain = EvidenceChain(settings.workspace / "evidence" / "chain.jsonl", signer=signer)
+        if req.verification is not None:
+            await chain.append(
+                kind="approval.verification",
+                actor=req.decided_by or args.by,
+                subsystem="hitl",
+                mission_id=req.mission_id,
+                data=req.verification.model_dump(mode="json"),
+            )
         await chain.append(
             kind="approval.decided",
             actor=req.decided_by or args.by,
@@ -177,12 +354,30 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
                 "note": req.note,
                 "provenance": req.provenance,
                 "tainted": req.tainted,
+                "credential_kind": req.credential.kind if req.credential else None,
+                "quorum": req.quorum,
+                "approvals": [d.model_dump(mode="json") for d in req.decisions],
+                "amount": req.amount,
+                "currency": req.currency,
+                "verification": (
+                    req.verification.model_dump(mode="json")
+                    if req.verification
+                    else None
+                ),
             },
         )
         publication = None
         if settings.atlassian_bridge_enabled:
             from .atlassian_bridge import build_bridge
+            from .egress import EgressGuard
 
+            EgressGuard(block_tainted=settings.block_tainted_egress).assert_allowed(
+                target=f"atlassian:{settings.atlassian_base_url or 'adr'}",
+                tainted=req.tainted,
+                classification="restricted" if req.tainted else "internal",
+                signoffs=[req],
+                also_targets=[req.target],
+            )
             bridge = build_bridge(settings, signer)
             seq, digest = chain.head
             try:
@@ -211,8 +406,18 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
         return 1
     except (ValueError, SecurityError) as exc:
         print(str(exc))
+        with suppress(Exception):
+            _log_verification_failure(settings, signer, args, str(exc))
         return 1
     print(f"{req.id} is now {req.status.value} ({req.target}); decided by {req.decided_by}")
+    if req.status.value == "pending":
+        remaining = max(0, req.quorum - len(req.decisions))
+        print(
+            f"dual-approver HITL: {len(req.decisions)}/{req.quorum} signatures; "
+            f"{remaining} more distinct approver(s) required"
+        )
+    if req.amount:
+        print(f"transaction bound to {req.amount} {req.currency}")
     if publication is not None:
         print(
             f"published ADR: {publication.page_url} "
@@ -267,6 +472,7 @@ def cmd_scale_advice(args: argparse.Namespace) -> int:
 def cmd_publish_decision(args: argparse.Namespace) -> int:
     """Retry or re-verify publication of an already-decided approval."""
     from .atlassian_bridge import build_bridge
+    from .egress import EgressGuard
     from .governance import ApprovalStatus
 
     settings = _settings(args)
@@ -279,6 +485,20 @@ def cmd_publish_decision(args: argparse.Namespace) -> int:
             raise KeyError(f"no such approval: {args.approval_id}")
         if req.status not in (ApprovalStatus.APPROVED, ApprovalStatus.DENIED):
             raise ValueError("only decided approvals may be published")
+        egress_target = f"atlassian:{settings.atlassian_base_url or 'adr'}"
+        signoffs = [req]
+        for signoff_id in getattr(args, "signoff", []) or []:
+            extra = await store.get(signoff_id)
+            if extra is None:
+                raise KeyError(f"no such egress sign-off approval: {signoff_id}")
+            signoffs.append(extra)
+        EgressGuard(block_tainted=settings.block_tainted_egress).assert_allowed(
+            target=egress_target,
+            tainted=req.tainted,
+            classification="restricted" if req.tainted else "internal",
+            signoffs=signoffs,
+            also_targets=[req.target],
+        )
         chain = EvidenceChain(
             settings.workspace / "evidence" / "chain.jsonl", signer=signer
         )
@@ -354,28 +574,73 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         check(False, "workspace writable", repr(exc))
 
     try:
-        signer = build_signer(settings)
-        check(signer is not None, "message authentication", "enabled" if signer else "DISABLED")
+        authority = build_message_authority(settings)
+        detail = (
+            "per-coordinator Ed25519"
+            if isinstance(authority, CoordinatorKeyring)
+            else ("enabled" if authority else "DISABLED")
+        )
+        check(authority is not None, "message authentication", detail)
     except SecurityError as exc:
         check(False, "message authentication", str(exc))
 
-    if (
-        settings.bus == "memory"
-        and not settings.shared_secret
-        and not settings.shared_secret_file
+    ephemeral = is_ephemeral_secret(settings)
+    if settings.strict_prod:
+        problems = validate_strict_prod(settings)
+        if problems:
+            for problem in problems:
+                check(False, "strict production", problem)
+        else:
+            check(
+                True,
+                "strict production",
+                "managed keys, signed approvers and per-coordinator signatures",
+            )
+        try:
+            rules = topic_rules_from_authority(authority, require_kid=True)
+            check(
+                all(rule.kids for rule in rules.values()),
+                "restricted topic keys",
+                "policy.verdict and approval.granted are pinned to coordinator kids",
+            )
+        except (BusConfigurationError, UnboundLocalError) as exc:
+            check(False, "restricted topic keys", str(exc))
+    elif (
+        ephemeral
         and (settings.workspace / "approvals.json").is_file()
     ):
         print(
-            "[warn] memory bus uses an ephemeral secret; set AGENT_SHARED_SECRET "
-            "so approvals written by another process verify"
+            "[warn] memory bus uses an ephemeral signing key; set AGENT_SHARED_SECRET "
+            "or configure managed per-coordinator Ed25519 keys so approvals written "
+            "by another process verify"
         )
 
-    if settings.require_approver_allowlist and not settings.approvers:
-        check(False, "approver allowlist", "AGENT_APPROVERS is required but empty")
-    elif settings.approvers:
-        check(True, "approver allowlist", f"{len(configured_approvers(settings))} configured")
+    try:
+        approver_registry = load_approver_registry(settings)
+        build_approval_verifier(settings, approver_registry)
+    except SecurityError as exc:
+        check(False, "approver registry", str(exc))
+        approver_registry = None
     else:
-        print("[warn] AGENT_APPROVERS is empty; any name can approve in this configuration")
+        if approver_registry is not None:
+            check(
+                True,
+                "approver registry",
+                f"{len(approver_registry.ids())} signed approvers in {approver_registry.source}",
+            )
+            unknown = configured_approvers(settings) - approver_registry.ids()
+            if unknown:
+                check(
+                    False,
+                    "approver allowlist",
+                    f"not in signed registry: {', '.join(sorted(unknown))}",
+                )
+        elif settings.require_approver_allowlist or settings.strict_prod:
+            check(False, "approver registry", "no approver registry configured")
+        elif settings.approvers:
+            check(True, "approver allowlist", f"{len(configured_approvers(settings))} configured")
+        else:
+            print("[warn] AGENT_APPROVERS is empty; any name can approve in this configuration")
 
     if settings.bus == "redis":
         try:
@@ -583,8 +848,17 @@ def _fragmentation_service(mesh, settings: Settings, fixtures: str | None):
 
 async def _run_ingest(args: argparse.Namespace) -> int:
     from .mesh import Mesh
+    from .storyboards import get_storyboard
 
     settings = _settings(args)
+    vertical = getattr(args, "vertical", None)
+    if vertical:
+        board = get_storyboard(vertical)
+        settings = settings_for_profile(
+            settings.model_copy(update={"role_profile": board.profile_id})
+        )
+        if not getattr(args, "fixtures", None):
+            args.fixtures = str(board.fixtures_dir)
     async with Mesh(settings) as mesh:
         service, owned = _fragmentation_service(mesh, settings, args.fixtures)
         if service is None:
@@ -624,8 +898,21 @@ async def _run_ingest(args: argparse.Namespace) -> int:
 
 async def _run_fragmentation_demo(args: argparse.Namespace) -> int:
     from .mesh import Mesh
+    from .storyboards import get_storyboard
 
     settings = _settings(args)
+    board = None
+    vertical = getattr(args, "vertical", None)
+    if vertical:
+        board = get_storyboard(vertical)
+        settings = settings_for_profile(
+            settings.model_copy(update={"role_profile": board.profile_id})
+        )
+        if not getattr(args, "fixtures", None):
+            args.fixtures = str(board.fixtures_dir)
+        # Restricted/PHI data may only be handled inside an explicit mission.
+        if board.profile_id == "clinical_healthcare" and not getattr(args, "mission", None):
+            args.mission = f"demo-{board.id}"
     async with Mesh(settings) as mesh:
         service, owned = _fragmentation_service(mesh, settings, args.fixtures)
         if service is None:
@@ -644,6 +931,9 @@ async def _run_fragmentation_demo(args: argparse.Namespace) -> int:
             if owned:
                 await service.close()
 
+        if board is not None:
+            print(f"storyboard: {board.name} - {board.money_shot}")
+            print(f"role profile: {settings.role_profile} (all nine coordinators still running)")
         ingest = report.ingest
         print(
             f"ingested {len(ingest.signals)} signals from "
@@ -795,18 +1085,70 @@ def cmd_sign_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_credential_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--signature", help="detached Ed25519 approval signature (hex)")
+    parser.add_argument("--signature-file", help="file containing the detached signature")
+    parser.add_argument("--id-token", help="OIDC/SSO id_token (compact JWT)")
+    parser.add_argument("--id-token-file", help="file containing the id_token")
+
+
+def cmd_approval_payload(args: argparse.Namespace) -> int:
+    """Print the exact bytes a human must sign for a detached approval."""
+    settings = _settings(args)
+    store = _approval_store(settings, _signer(settings))
+    req = asyncio.run(store.get(args.approval_id))
+    if req is None:
+        print(f"no such approval: {args.approval_id}")
+        return 1
+    payload = approval_credential_payload(
+        req, approved=args.approve, approver=args.by
+    )
+    print(payload.decode("utf-8"))
+    return 0
+
+
+def cmd_sign_approvers(args: argparse.Namespace) -> int:
+    """Detach-sign an approver registry file with an offline Ed25519 key."""
+    from .asymmetric import load_private_key, sign_file
+
+    private = load_private_key(None, args.key_file)
+    out = args.out or f"{args.registry_file}.sig"
+    signature = sign_file(private, args.registry_file, out)
+    print(f"{out}: {signature}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agents", description="USOC nine-subsystem agent mesh")
     parser.add_argument("--registry", help="path to subsystems.yaml")
     parser.add_argument("--workspace", help="workspace directory for tools")
     parser.add_argument("--json-logs", action="store_true", help="structured logs on stderr")
+    parser.add_argument(
+        "--profile",
+        help="industry role-profile view (overrides AGENT_ROLE_PROFILE)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     demo = sub.add_parser("demo", help="run one goal end to end")
     demo.add_argument("goal", nargs="?", help="goal text (defaults to the USOC edge-telemetry example)")
 
     sub.add_parser("list", help="print the nine capability cards and their roles")
+    sub.add_parser("profiles", help="list Industry Starter Profiles and active role counts")
     sub.add_parser("doctor", help="check config, registry, bus, model and security")
+    export = sub.add_parser("export", help="export verified evidence in compliance formats")
+    export.add_argument(
+        "--format",
+        choices=["jsonl", "oekp", "bengal", "oekp_bengal"],
+        help="format to render (default: AGENT_EVIDENCE_EXPORT_FORMATS)",
+    )
+    export.add_argument("--output", help="directory for exported evidence files")
+    storyboard = sub.add_parser("storyboard", help="print a 3-minute vertical demo storyboard")
+    storyboard.add_argument(
+        "--vertical",
+        choices=["cyber", "finance", "healthcare", "all"],
+        default="all",
+        help="audience vertical (default: all)",
+    )
     integrity = sub.add_parser(
         "integrity", help="print or verify the capability-card manifest hash/signature"
     )
@@ -831,6 +1173,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sign_config.add_argument("--key-file", required=True, help="Ed25519 private key (PEM/hex)")
     sign_config.add_argument("--out", help="detached signature path (default: <registry>.sig)")
+    sign_approvers = sub.add_parser(
+        "sign-approvers", help="detach-sign the approver registry with an offline Ed25519 key"
+    )
+    sign_approvers.add_argument("--registry-file", required=True, help="approver registry JSON")
+    sign_approvers.add_argument("--key-file", required=True, help="offline Ed25519 private key")
+    sign_approvers.add_argument("--out", help="signature path (default: <registry>.sig)")
+    approval_payload = sub.add_parser(
+        "approval-payload", help="print the canonical payload a human signs for an approval"
+    )
+    approval_payload.add_argument("approval_id")
+    approval_payload.add_argument("--by", required=True, help="approver identity")
+    decision = approval_payload.add_mutually_exclusive_group(required=True)
+    decision.add_argument("--approve", action="store_true", help="payload for an approval")
+    decision.add_argument("--deny", action="store_true", help="payload for a denial")
     serve = sub.add_parser("serve", help="start the mesh, health endpoint and recovery loop")
     serve.add_argument("--host", help="health bind address (default AGENT_HEALTH_HOST)")
     serve.add_argument("--port", type=int, help="health port (default AGENT_HEALTH_PORT)")
@@ -861,20 +1217,34 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("approval_id")
     approve.add_argument("--by", default="operator", help="approver identity")
     approve.add_argument("--note")
+    _add_credential_args(approve)
 
     deny = sub.add_parser("deny", help="deny a pending action as a human")
     deny.add_argument("approval_id")
     deny.add_argument("--by", default="operator")
     deny.add_argument("--note")
+    _add_credential_args(deny)
 
     publish = sub.add_parser(
         "publish-decision", help="publish/retry a decided approval to Atlassian"
     )
     publish.add_argument("approval_id")
+    publish.add_argument(
+        "--signoff",
+        action="append",
+        default=[],
+        metavar="APPROVAL_ID",
+        help="approved, signed approval whose target covers this external egress",
+    )
 
     ingest = sub.add_parser("ingest", help="poll read-only connectors and print normalized signals")
     ingest.add_argument("--fixtures", help="directory of <source_type>.jsonl fixtures")
     ingest.add_argument("--connectors", help="path to connectors.yaml")
+    ingest.add_argument(
+        "--vertical",
+        choices=["cyber", "finance", "healthcare"],
+        help="demo storyboard vertical (swaps connector/target nouns and fixtures)",
+    )
     ingest.add_argument("--limit", type=int, default=10, help="sample signals to print")
 
     frag = sub.add_parser(
@@ -887,6 +1257,11 @@ def build_parser() -> argparse.ArgumentParser:
     frag.add_argument("--approval", help="approval ref from a previous HOLD to re-dispatch")
     frag.add_argument("--no-propose", action="store_true", help="correlate without requesting action")
     frag.add_argument("--limit", type=int, default=5, help="incidents to print")
+    frag.add_argument(
+        "--vertical",
+        choices=["cyber", "finance", "healthcare"],
+        help="demo storyboard vertical (swaps connector/target nouns and fixtures)",
+    )
     return parser
 
 
@@ -894,6 +1269,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "list":
         return cmd_list(args)
+    if args.command == "profiles":
+        return cmd_profiles(args)
+    if args.command == "export":
+        return cmd_export(args)
+    if args.command == "storyboard":
+        return cmd_storyboard(args)
     if args.command == "doctor":
         return cmd_doctor(args)
     if args.command == "integrity":
@@ -902,6 +1283,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_keygen(args)
     if args.command == "sign-config":
         return cmd_sign_config(args)
+    if args.command == "sign-approvers":
+        return cmd_sign_approvers(args)
+    if args.command == "approval-payload":
+        return cmd_approval_payload(
+            argparse.Namespace(**{**vars(args), "approve": not args.deny})
+        )
     if args.command == "approvals":
         return cmd_approvals(args)
     if args.command == "probe":

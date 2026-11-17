@@ -1,0 +1,1 @@
+{"id":"fin-id-118","timestamp":"2026-11-14T11:04:00Z","entity":"merchant-account-884","entity_type":"service","aliases":["merchant-884"],"severity":"high","category":"authentication_anomaly","title":"New payee added to merchant-account-884 outside change window","amount":"4820.00","currency":"USD","containment_target":"sandbox/merchant-account-884"}

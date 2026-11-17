@@ -50,9 +50,11 @@ from .fragmentation import (
     ProposedAction,
 )
 from .governance import (
+    ApprovalCredential,
     ApprovalRequest,
     ApprovalStatus,
     ApprovalStore,
+    ApprovalVerification,
     DecisionType,
     FileApprovalStore,
     GovernanceDecision,
@@ -76,6 +78,13 @@ from .tools import (
     build_default_tools,
     scoped_tool_registry,
 )
+from .trust import (
+    ApproverRegistry,
+    CoordinatorKeyring,
+    build_approval_verifier,
+    build_message_authority,
+    load_approver_registry,
+)
 from .usoc_agents import AiceeAgent, BengalAgent, HitlAgent, OekpAgent, SeraphimAgent
 
 __version__ = "0.1.0"
@@ -84,9 +93,12 @@ __all__ = [
     "ActionClass",
     "AgentError",
     "AiceeAgent",
+    "ApprovalCredential",
     "ApprovalRequest",
     "ApprovalStatus",
     "ApprovalStore",
+    "ApprovalVerification",
+    "ApproverRegistry",
     "AtlassianBridge",
     "PublicationEnvelope",
     "Artifact",
@@ -100,6 +112,7 @@ __all__ = [
     "CorrelationConfig",
     "CorrelationEngine",
     "CorrelationResult",
+    "CoordinatorKeyring",
     "DecisionType",
     "EchoLLM",
     "Ed25519KMSSigner",
@@ -161,13 +174,16 @@ __all__ = [
     "ToolError",
     "ToolRegistry",
     "ToolSpec",
+    "build_approval_verifier",
     "build_bus",
     "build_default_tools",
     "build_llm",
+    "build_message_authority",
     "build_signer",
     "configured_approvers",
     "get_settings",
     "ingest_connectors",
+    "load_approver_registry",
     "load_connectors",
     "load_registry",
     "redact_url",

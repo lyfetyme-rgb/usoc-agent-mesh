@@ -1,0 +1,1 @@
+{"id":"fin-cost-410","timestamp":"2026-11-14T11:02:00Z","entity":"merchant-account-884","entity_type":"service","aliases":["merchant-884"],"severity":"high","category":"transaction_anomaly","title":"Wire amount 4.8x baseline for merchant-account-884","amount":"4820.00","currency":"USD","containment_target":"sandbox/merchant-account-884"}

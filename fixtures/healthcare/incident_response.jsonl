@@ -1,0 +1,1 @@
+{"id":"hc-ir-155","timestamp":"2026-11-14T11:06:00Z","entity":"automated-dispense-queue","entity_type":"service","aliases":["dispense-queue-04"],"severity":"critical","category":"patient_safety","title":"Patient safety escalation for dispense queue","mrn":"MRN-88231","lab_result":"critical_glucose","containment_target":"sandbox/automated-dispense-queue"}
