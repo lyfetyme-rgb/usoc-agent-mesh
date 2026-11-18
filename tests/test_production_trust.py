@@ -237,7 +237,10 @@ def test_detached_signature_approval_and_tamper(tmp_path):
     assert result.verified and result.method == "detached"
     assert result.role == "commander" and result.max_tier is RiskLevel.HIGH
 
-    req.credential = ApprovalCredential(kind="detached", signature=valid[:-2] + "00")
+    # Flip the first hex character deterministically: replacing the tail with
+    # "00" was a no-op whenever the random signature already ended in "00".
+    tampered = ("0" if valid[0] != "0" else "1") + valid[1:]
+    req.credential = ApprovalCredential(kind="detached", signature=tampered)
     assert not verifier("alice", req).verified
     assert not verifier("mallory", req).verified
 
