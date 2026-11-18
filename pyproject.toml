@@ -1,6 +1,6 @@
 [project]
 name = "agent-mesh"
-version = "0.1.0"
+version = "0.1.1"
 description = "USOC: nine governed subsystem agents on a typed message bus"
 license = "BUSL-1.1"
 license-files = ["LICENSE", "LICENSE.ELASTIC-2.0"]
