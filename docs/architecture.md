@@ -4,10 +4,11 @@ This document describes the implemented skeleton of the USOC multi-agent
 architecture: nine subsystem coordinators on a typed message bus, a deterministic
 governance gate, human approvals, and an append-only evidence chain.
 
-The conceptual baseline is the USOC master architecture: **9 subsystems, 93
-logical subsystem roles, plus 7 SHELL roles (100 logical agents)**. The
-implementation decision is to run **one coordinator per subsystem** and treat the
-roles as declared capabilities. See [§11](#11-roles-vs-runtime-workers).
+The in-repo capability baseline is `subsystems.yaml`: **9 subsystems, 93 logical
+subsystem roles, plus 7 SHELL roles (100 logical agents)**. The delivery rules
+are in [toolbox/CONSTITUTION.md](../toolbox/CONSTITUTION.md). The implementation
+decision is to run **one coordinator per subsystem** and treat the roles as
+declared capabilities. See [§11](#11-roles-vs-runtime-workers).
 
 ## 1. Topology
 
@@ -53,8 +54,10 @@ SHELL is not a domain agent either. Its seven roles are platform functions:
 
 ## 2. The operational workflow
 
-The master prompt defines twelve steps. The skeleton supports all of them as
-agents; the planner selects the subset a goal needs.
+The governed workflow has twelve steps, as recorded in
+[toolbox/PLAYBOOK.md](../toolbox/PLAYBOOK.md) with the delivery rules in
+[toolbox/CONSTITUTION.md](../toolbox/CONSTITUTION.md). The skeleton supports all
+of them as agents; the planner selects the subset a goal needs.
 
 | step | owner | status in this repo |
 |---|---|---|
@@ -469,10 +472,12 @@ secret loading are implemented.
 
 ## 11. Roles vs. runtime workers
 
-The master prompt is explicit that the 100-agent allocation is a target
-capability model, not a requirement to run 100 LLM instances, and that each role
-should be evaluated as an AI agent, deterministic service, background worker,
-policy engine, human function or shared capability.
+The 100-agent allocation is a target capability model, not a requirement to run
+100 LLM instances. `subsystems.yaml` declares the 93 subsystem roles, and
+[toolbox/CONSTITUTION.md](../toolbox/CONSTITUTION.md) fixes the fail-closed,
+least-privilege rules; each role is therefore evaluated as an AI agent,
+deterministic service, background worker, policy engine, human function or
+shared capability.
 
 Current split:
 
@@ -595,8 +600,9 @@ Redis adapter.
 
 ## 15. Implementation roadmap and deliverables
 
-The master prompt asks for deliverables A–H and for foundational contracts and
-governance to land before higher-risk autonomy.
+Deliverables A–H are listed below. As required by
+[toolbox/CONSTITUTION.md](../toolbox/CONSTITUTION.md), foundational contracts
+and governance land before higher-risk autonomy.
 
 | deliverable | this repository | remaining work |
 |---|---|---|
