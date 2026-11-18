@@ -9,7 +9,9 @@ LLM output never decides a policy outcome. ``PolicyEngine`` is plain code with
 explicit rules, and a DENY here cannot be overridden by any agent, prompt or
 model response.
 
-Decisions match the master prompt: ALLOW, HOLD, DENY, CONTAIN.
+Decisions follow the in-repo governance contract
+(``toolbox/CONSTITUTION.md`` and ``docs/architecture.md``): ALLOW, HOLD, DENY,
+CONTAIN.
 """
 
 from __future__ import annotations
@@ -89,8 +91,9 @@ def taint_disclosure_hash(provenance: list[str] | None, tainted: bool) -> str:
 
 AUTHORIZATION_TTL_S = 900
 
-# Defensive-only boundary from the USOC master prompt. These are screening
-# signals for the CYBER DEFENSE subsystem, not a content filter.
+# Defensive-only boundary for the CYBER DEFENSE subsystem, as declared in
+# ``subsystems.yaml`` and ``docs/architecture.md``. These are screening signals,
+# not a content filter.
 PROHIBITED_PATTERNS = (
     "credential theft",
     "steal credentials",

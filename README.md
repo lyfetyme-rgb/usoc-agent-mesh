@@ -5,10 +5,12 @@ nine governed subsystem coordinators that communicate over one typed message bus
 wrapped in the deterministic controls USOC requires — a policy decision point,
 human approvals, and an append-only evidence chain.
 
-The master architecture calls for **93 subsystem roles plus 7 SHELL roles = 100
-logical agents**. This repository implements the **9 subsystem coordinators** and
-the SHELL as platform infrastructure, and declares all 93 roles on the capability
-cards so the full surface is visible and routable. See
+The USOC capability model calls for **93 subsystem roles plus 7 SHELL roles =
+100 logical agents**. The declared inventory lives in `subsystems.yaml`; the
+delivery rules live in [toolbox/CONSTITUTION.md](toolbox/CONSTITUTION.md). This
+repository implements the **9 subsystem coordinators** and the SHELL as platform
+infrastructure, and declares all 93 roles on the capability cards so the full
+surface is visible and routable. See
 [Roles vs. runtime workers](#roles-vs-runtime-workers).
 
 ```
@@ -245,8 +247,10 @@ another; otherwise MAC verification correctly fails.
 
 ## Governance, not vibes
 
-USOC's rule is that **an AI recommendation is not execution authority**. The
-master workflow has twelve steps:
+USOC's rule is that **an AI recommendation is not execution authority**, pinned
+in [toolbox/CONSTITUTION.md](toolbox/CONSTITUTION.md). The governed workflow has
+twelve steps (see [toolbox/PLAYBOOK.md](toolbox/PLAYBOOK.md) and
+[§2 of the architecture](docs/architecture.md#2-the-operational-workflow)):
 
 ```
 observation -> intelligence -> mission interpretation -> security analysis
@@ -503,7 +507,9 @@ One bus, one envelope type, four verbs:
 Direct messages go to `inbox.<agent>`; broadcasts go to `topic.<name>`.
 Everything is validated by pydantic at both ends.
 
-The envelope carries the USOC governance fields required by the master prompt:
+The envelope carries the USOC governance fields required by the in-repo
+governance contract ([toolbox/CONSTITUTION.md](toolbox/CONSTITUTION.md),
+[§3 of the architecture](docs/architecture.md#3-message-lifecycle)):
 `mission_id`, `tenant_id`, `classification`, `policy_decision_ref`,
 `authorization_ref`, `evidence_ref`, alongside `schema_version`, `message_id`,
 `correlation_id`, `causation_id`, timestamps, sender/recipient, topic, hop,
