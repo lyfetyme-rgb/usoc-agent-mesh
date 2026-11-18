@@ -1,7 +1,8 @@
 # ---------------------------------------------------------------------------
 # USOC - Unified System Operations Center
 #
-# Nine subsystems from the master architecture, one coordinator agent each.
+# Nine subsystems from the in-repo capability baseline (docs/architecture.md,
+# toolbox/CONSTITUTION.md), one coordinator agent each.
 # The 93 logical roles are declared per subsystem so the mesh knows the full
 # capability surface; roles become separate workers only when load or isolation
 # requires it. SHELL is not listed here: routing, contract validation, runtime

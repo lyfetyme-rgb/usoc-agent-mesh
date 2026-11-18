@@ -10,9 +10,10 @@ The seven SHELL roles are platform functions, not another domain agent:
   6 Configuration Coordination-> Settings, subsystems.yaml, signed policy refs
   7 Integration Diagnostics  -> diagnostics() below
 
-Keeping SHELL as infrastructure follows the master prompt's instruction that
-critical routing and security controls be deterministic services, not
-probabilistic agents.
+Keeping SHELL as infrastructure follows the in-repo delivery constitution
+(``toolbox/CONSTITUTION.md``), which requires deterministic, fail-closed policy
+and routing controls rather than probabilistic agents. The SHELL boundary is
+recorded in ``subsystems.yaml``.
 """
 
 from __future__ import annotations

@@ -6,6 +6,7 @@ One source per claim. If two disagree, this list decides which is truth.
 |---|---|
 | Goal, steps, done definition | `toolbox/PLAYBOOK.md` |
 | How changes are made | `toolbox/CONSTITUTION.md` |
+| Capability baseline and governance rules (self-contained in git) | `toolbox/CONSTITUTION.md` + `subsystems.yaml` |
 | Repo layout | `README.md` |
 | Threat model, controls, bridge, rotation, audit | `SECURITY.md` |
 | Message lifecycle, governance gate, failure matrix | `docs/architecture.md` |

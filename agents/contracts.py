@@ -177,7 +177,8 @@ class Message(Strict):
     attempt: int = Field(default=0, ge=0)
     deadline: datetime | None = None
     created_at: datetime = Field(default_factory=_now)
-    # USOC governance envelope fields (section 15 of the master prompt)
+    # USOC governance envelope fields (see ``toolbox/CONSTITUTION.md`` and
+    # ``docs/architecture.md`` §3, "Message lifecycle")
     mission_id: str | None = Field(default=None, max_length=100)
     tenant_id: str | None = Field(default=None, max_length=100)
     classification: Classification = Classification.INTERNAL
