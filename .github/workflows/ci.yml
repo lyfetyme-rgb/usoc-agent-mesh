@@ -16,12 +16,35 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
       - name: Install dependencies
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Submodule drift check
+        run: |
+          set -euo pipefail
+          recorded=$(git ls-tree HEAD h-lift | awk '{print $3}')
+          remote=$(git ls-remote https://github.com/lyfetyme-rgb/h-lift.git refs/heads/main | awk '{print $1}')
+          echo "h-lift recorded=$recorded"
+          echo "h-lift main  =$remote"
+          status=$(git submodule status h-lift)
+          case "$status" in
+            +*|-*|U*)
+              echo "::error::h-lift submodule pointer is not clean in this tree: $status"
+              exit 1
+              ;;
+          esac
+          if [ "$recorded" != "$remote" ]; then
+            if [ "${GITHUB_REF_NAME:-}" = "main" ]; then
+              echo "::error::h-lift pointer ($recorded) is not h-lift main ($remote). Update it with: git add h-lift && git commit"
+              exit 1
+            fi
+            echo "::warning::h-lift pointer ($recorded) lags h-lift main ($remote) on ${GITHUB_REF_NAME}; allowed off main"
+          fi
       - name: Run test suite
         run: python -m pytest -q
       - name: Doctor (offline)
