@@ -54,3 +54,5 @@ jobs:
           python -m agents storyboard --vertical cyber > /dev/null
           python -m agents storyboard --vertical finance > /dev/null
           python -m agents storyboard --vertical healthcare > /dev/null
+      - name: Offline LLM rehearsal (zero egress)
+        run: python -m agents --workspace workspace/rehearsal-ci llm-rehearsal > /dev/null

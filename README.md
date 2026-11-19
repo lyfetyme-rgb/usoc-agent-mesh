@@ -46,7 +46,7 @@ python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --vertical finance      # transaction gate + dual HITL
 python -m agents demo-fragmentation --vertical healthcare   # PII/PHI taint + signed egress
-python -m pytest -q              # 302 passed, 1 env-gated skip, no network
+python -m pytest -q              # 311 passed, 1 env-gated skip, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
@@ -73,7 +73,7 @@ the bridge is opt-in and its tests use an injected HTTP transport.
 
 | Time | Show | Point |
 |---|---|---|
-| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 302 passing with 1 symlink skip. |
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 311 passing with 1 symlink skip. |
 | 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
 | 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
 | 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |
@@ -552,6 +552,44 @@ python -m agents demo
 With a real endpoint the orchestrator can use `LLMPlanner`, which plans a DAG
 against the same capability cards. Without one it uses the deterministic
 `RouterPlanner`.
+
+### Live LLM rehearsal (staged rollout)
+
+Before pointing the mesh at a live model, rehearse it. The harness sends
+labeled prompts to the model, screens the *untrusted* output with the real
+deterministic policy, and measures latency, tokens, prompt-injection hits and
+HOLD/DENY accuracy — without executing anything:
+
+```powershell
+python -m agents llm-rehearsal                    # offline EchoLLM, zero network
+python -m agents llm-rehearsal --live             # opt into AGENT_LLM_BASE_URL model egress
+python -m agents llm-rehearsal --output exports/ # also write an oekp_bengal evidence export
+```
+
+The default path uses `EchoLLM` and makes no network call; `--live` is the only
+way to reach `AGENT_LLM_BASE_URL`, and it fails closed if no base URL is set.
+Rehearsal has **no tools, handlers, bus traffic, approval decisions, approval
+consumption, egress guard calls or external writes** — it never constructs a
+`Mesh` or calls a task handler. Cases live in
+`fixtures/llm_rehearsal/cases.jsonl` (one labeled JSON object per line; pass
+`--cases` to use your own).
+
+Every observation is appended to a hash-chained evidence file
+(`evidence/llm-rehearsal.jsonl` in the isolated shadow workspace) signed by the
+same `build_signer(settings)` trust root as the mesh — HMAC or Ed25519 per
+`AGENT_SIGNING_MODE`. Each record is hard-coded `rehearsal_only=true`,
+`shadow=true` and `tainted=true`, with `llm-rehearsal` /
+`untrusted-model-output` provenance, so BENGAL withholds
+`trusted_for_execution`. A fresh run id and a per-record nonce sit inside the
+signed payload, alongside the SHA-256 prompt/response digests, so a prior run
+cannot be replayed as a new one. API keys and endpoint credentials are never
+logged; URLs are redacted.
+
+The policy screen (`PolicyEngine.screen_text`) is NFKC + casefold substring
+matching against a defensive-only pattern list — it is a speed bump, not a
+jailbreak detector. The `jailbreak-instruction` fixture deliberately expects no
+screen hit to document this known limitation; regex/semantic detection is out
+of scope here.
 
 Governance-relevant environment settings:
 

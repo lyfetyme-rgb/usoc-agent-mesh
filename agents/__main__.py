@@ -6,6 +6,8 @@
     python -m agents profiles                       # 4 Industry Starter Packs and role counts
     python -m agents --profile finops_banking list  # narrow the capability-card role view
     python -m agents storyboard --vertical finance  # 3-minute Money Shot storyboard
+    python -m agents llm-rehearsal                   # offline LLM/policy rehearsal (no egress)
+    python -m agents llm-rehearsal --live            # opt into AGENT_LLM_BASE_URL model egress
     python -m agents export --format oekp_bengal --output exports/
     python -m agents doctor
     python -m agents integrity
@@ -245,6 +247,98 @@ def cmd_storyboard(args: argparse.Namespace) -> int:
         if index:
             print("\n" + "=" * 78 + "\n")
         print(render_storyboard(board.id))
+    return 0
+
+
+def _load_rehearsal_cases(path: Path) -> list:
+    """Load labeled JSONL cases, failing closed on a malformed line."""
+    from .llm_rehearsal import RehearsalCase
+
+    cases: list = []
+    with path.open("r", encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                cases.append(RehearsalCase.model_validate_json(line))
+            except ValueError as exc:
+                raise ValueError(f"{path}:{lineno}: invalid rehearsal case: {exc}") from exc
+    if not cases:
+        raise ValueError(f"no rehearsal cases in {path}")
+    return cases
+
+
+async def _run_llm_rehearsal(args: argparse.Namespace) -> int:
+    """Run labeled prompts through the model and deterministic policy; observe only."""
+    from .evidence import render_export
+    from .governance import InMemoryApprovalStore, PolicyConfig, PolicyEngine
+    from .llm import EchoLLM, build_llm
+    from .llm_rehearsal import run_rehearsal
+
+    # Force the shadow baseline: isolated workspace, bridges off. The harness
+    # itself hard-codes rehearsal_only/shadow on every evidence record and never
+    # calls a tool, handler, approval decision or external sink.
+    args.shadow = True
+    settings = _settings(args)
+    live = bool(getattr(args, "live", False))
+    if live and not settings.llm_base_url:
+        print(
+            "llm-rehearsal: --live requires AGENT_LLM_BASE_URL "
+            "(omit --live for the offline EchoLLM baseline)",
+            file=sys.stderr,
+        )
+        return 2
+
+    cases_path = Path(args.cases)
+    if not cases_path.is_file():
+        print(f"llm-rehearsal: no such cases file: {cases_path}", file=sys.stderr)
+        return 1
+    try:
+        cases = _load_rehearsal_cases(cases_path)
+    except (OSError, ValueError) as exc:
+        print(f"llm-rehearsal: {exc}", file=sys.stderr)
+        return 1
+
+    evidence = EvidenceChain(
+        settings.workspace / "evidence" / "llm-rehearsal.jsonl", signer=_signer(settings)
+    )
+    policy = PolicyEngine(
+        PolicyConfig(
+            allowed_targets=[
+                item.strip() for item in settings.allowed_targets.split(",") if item.strip()
+            ],
+            # Rehearsal never authorizes an egress destination.
+            egress_target=None,
+        ),
+        InMemoryApprovalStore(),
+    )
+    llm = build_llm(settings) if live else EchoLLM()
+    try:
+        report = await run_rehearsal(
+            settings=settings,
+            llm=llm,
+            evidence=evidence,
+            policy=policy,
+            cases=cases,
+            live=live,
+        )
+    finally:
+        await llm.close()
+
+    print(json.dumps(json.loads(report.model_dump_json()), indent=2, sort_keys=True))
+    if getattr(args, "output", None):
+        out = Path(args.output)
+        out.mkdir(parents=True, exist_ok=True)
+        ok, detail = evidence.verify()
+        dest = out / "evidence.oekp-bengal.json"
+        dest.write_text(
+            render_export(
+                evidence.records(), "oekp_bengal", verified=ok, detail=detail
+            ),
+            encoding="utf-8",
+        )
+        print(f"evidence export: {dest}")
     return 0
 
 
@@ -1209,6 +1303,21 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help="audience vertical (default: all)",
     )
+    rehearsal = sub.add_parser(
+        "llm-rehearsal",
+        help="run labeled prompts through the model and deterministic policy; observe only",
+    )
+    rehearsal.add_argument(
+        "--cases",
+        default=str(Path("fixtures") / "llm_rehearsal" / "cases.jsonl"),
+        help="JSONL file of labeled rehearsal cases",
+    )
+    rehearsal.add_argument("--output", help="directory for an oekp_bengal evidence export")
+    rehearsal.add_argument(
+        "--live",
+        action="store_true",
+        help="allow AGENT_LLM_BASE_URL model egress (default: offline EchoLLM, no network)",
+    )
     integrity = sub.add_parser(
         "integrity", help="print or verify the capability-card manifest hash/signature"
     )
@@ -1382,6 +1491,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_run_ingest(args))
         if args.command == "demo-fragmentation":
             return asyncio.run(_run_fragmentation_demo(args))
+        if args.command == "llm-rehearsal":
+            return asyncio.run(_run_llm_rehearsal(args))
     except KeyboardInterrupt:
         return 130
     return 2
