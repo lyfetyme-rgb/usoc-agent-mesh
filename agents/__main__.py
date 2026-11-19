@@ -1,6 +1,7 @@
 """CLI: python -m agents {demo,list,profiles,storyboard,export,doctor,integrity,keygen,sign-config,sign-approvers,approval-payload,serve,worker,scale-advice,probe,health,approvals,approve,deny,publish-decision,ingest,demo-fragmentation}
 
     python -m agents demo "Collect edge telemetry, analyse anomalies, record evidence"
+    python -m agents shadow "Collect edge telemetry, evaluate containment"  # observe, never execute
     python -m agents list
     python -m agents profiles                       # 4 Industry Starter Packs and role counts
     python -m agents --profile finops_banking list  # narrow the capability-card role view
@@ -86,6 +87,21 @@ def _settings(args: argparse.Namespace) -> Settings:
     if getattr(args, "profile", None):
         overrides["role_profile"] = args.profile
     settings = base.model_copy(update=overrides) if overrides else base
+    if getattr(args, "shadow", False):
+        settings = settings.model_copy(update={"shadow_mode": True})
+    if getattr(settings, "shadow_mode", False):
+        shadow_ws = (
+            settings.workspace
+            if settings.workspace.name == "shadow"
+            else settings.workspace / "shadow"
+        )
+        settings = settings.model_copy(
+            update={
+                "workspace": shadow_ws,
+                "atlassian_bridge_enabled": False,
+                "atlassian_jsm_enabled": False,
+            }
+        )
     return settings_for_profile(settings)
 
 
@@ -318,6 +334,11 @@ def _log_verification_failure(settings: Settings, signer, args: argparse.Namespa
 
 def _decide(args: argparse.Namespace, approved: bool) -> int:
     settings = _settings(args)
+    if settings.shadow_mode:
+        print(
+            "shadow mode: approvals are disabled; use 'agents shadow' to observe decisions"
+        )
+        return 1
     signer = _signer(settings)
     store = _approval_store(settings, signer)
 
@@ -371,7 +392,10 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
             from .atlassian_bridge import build_bridge
             from .egress import EgressGuard
 
-            EgressGuard(block_tainted=settings.block_tainted_egress).assert_allowed(
+            EgressGuard(
+                block_tainted=settings.block_tainted_egress,
+                shadow=settings.shadow_mode,
+            ).assert_allowed(
                 target=f"atlassian:{settings.atlassian_base_url or 'adr'}",
                 tainted=req.tainted,
                 classification="restricted" if req.tainted else "internal",
@@ -493,7 +517,10 @@ def cmd_publish_decision(args: argparse.Namespace) -> int:
             if extra is None:
                 raise KeyError(f"no such egress sign-off approval: {signoff_id}")
             signoffs.append(extra)
-        EgressGuard(block_tainted=settings.block_tainted_egress).assert_allowed(
+        EgressGuard(
+            block_tainted=settings.block_tainted_egress,
+            shadow=settings.shadow_mode,
+        ).assert_allowed(
             target=egress_target,
             tainted=req.tainted,
             classification="restricted" if req.tainted else "internal",
@@ -714,6 +741,19 @@ async def _run_demo(args: argparse.Namespace) -> int:
         _print_flow(mesh.trace())
         print(f"\nmetrics: {mesh.metrics.snapshot()['counters']}")
         return 0 if result.ok else 1
+
+
+async def _run_shadow(args: argparse.Namespace) -> int:
+    """Run the mesh against real inputs but never execute or write externally."""
+    args.shadow = True
+    print(
+        "SHADOW MODE: policy/HITL/evidence only; execution, mutating tools and "
+        "external writes are disabled\n"
+    )
+    rc = await _run_demo(args)
+    if rc == 0:
+        print("\nshadow run complete: no action executed, no external write performed")
+    return rc
 
 
 def _print_flow(history: list, limit: int = 80) -> None:
@@ -1134,6 +1174,12 @@ def build_parser() -> argparse.ArgumentParser:
     demo = sub.add_parser("demo", help="run one goal end to end")
     demo.add_argument("goal", nargs="?", help="goal text (defaults to the USOC edge-telemetry example)")
 
+    shadow = sub.add_parser(
+        "shadow", help="run one goal in shadow mode (observe only; never execute or write)"
+    )
+    shadow.add_argument("goal", nargs="?", help="goal text (defaults to the USOC edge-telemetry example)")
+    shadow.set_defaults(shadow=True)
+
     sub.add_parser("list", help="print the nine capability cards and their roles")
     sub.add_parser("profiles", help="list Industry Starter Profiles and active role counts")
     sub.add_parser("doctor", help="check config, registry, bus, model and security")
@@ -1306,6 +1352,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "demo":
             return asyncio.run(_run_demo(args))
+        if args.command == "shadow":
+            return asyncio.run(_run_shadow(args))
         if args.command == "serve":
             return asyncio.run(_run_serve(args))
         if args.command == "worker":

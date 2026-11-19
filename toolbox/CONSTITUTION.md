@@ -18,7 +18,11 @@ negotiable because "the demo is on Friday" and it is enforced at review.
    substitution only.
 6. **No live writes in CI.** Tests inject transports; only an explicitly
    enabled, approval-gated publish may touch a real site.
-7. **Docs are part of the change.** README, SECURITY and docs move with the
+7. **Shadow execution is impossible.** `AGENT_SHADOW_MODE` keeps policy/HITL/
+   evidence fidelity on real inputs but handlers, mutating tools, egress and
+   external bridges fail closed; state is isolated and shadow evidence is never
+   trusted as execution proof.
+8. **Docs are part of the change.** README, SECURITY and docs move with the
    code or the change does not ship.
 
 ## 1. Specify

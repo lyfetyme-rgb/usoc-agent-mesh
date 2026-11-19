@@ -94,7 +94,21 @@ class Mesh:
         self._planner_override = planner
         self._approvals_override = approvals
         self._fragmentation_override = fragmentation
-        self._workspace = self.settings.workspace / workspace_subdir if workspace_subdir else self.settings.workspace
+        # Shadow runs get their own workspace so approvals, evidence and publish
+        # state can never be confused with live state. CLI callers that already
+        # point at a .../shadow workspace are not double-nested.
+        if (
+            self.settings.shadow_mode
+            and not workspace_subdir
+            and self.settings.workspace.name != "shadow"
+        ):
+            self._workspace = self.settings.workspace / "shadow"
+        else:
+            self._workspace = (
+                self.settings.workspace / workspace_subdir
+                if workspace_subdir
+                else self.settings.workspace
+            )
         self._agents_filter = [a.strip() for a in agents] if agents else None
         self._run_orchestrator = run_orchestrator
 
@@ -141,6 +155,7 @@ class Mesh:
             self._workspace,
             self.evidence,
             allow_delete=self.settings.allow_workspace_delete,
+            allow_write=not self.settings.shadow_mode,
         )
         self.registry = load_registry(self._registry_path, tools, settings=self.settings)
         # The profile narrows role views only. Every coordinator stays running
@@ -226,6 +241,7 @@ class Mesh:
                     "approvers": [d.approver for d in request.decisions],
                 },
                 tainted=request.tainted,
+                shadow=self.settings.shadow_mode,
             )
 
         from .profiles import parse_amount
