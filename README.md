@@ -46,7 +46,7 @@ python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --vertical finance      # transaction gate + dual HITL
 python -m agents demo-fragmentation --vertical healthcare   # PII/PHI taint + signed egress
-python -m pytest -q              # 295 passed, 1 env-gated skip, no network
+python -m pytest -q              # 302 passed, 1 env-gated skip, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
@@ -73,7 +73,7 @@ the bridge is opt-in and its tests use an injected HTTP transport.
 
 | Time | Show | Point |
 |---|---|---|
-| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 295 passing with 1 symlink skip. |
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 302 passing with 1 symlink skip. |
 | 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
 | 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
 | 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |

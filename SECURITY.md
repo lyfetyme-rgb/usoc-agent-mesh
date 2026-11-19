@@ -33,6 +33,10 @@ without the secret.
   (`mesh:dlq` on Redis, `bus.dlq` in memory). They are never handed to an agent.
 * `AGENT_MAX_MESSAGE_AGE_S` optionally rejects old messages. It is off by
   default because at-least-once delivery can legitimately redeliver a message.
+  When set, the same freshness contract applies uniformly to every signing mode
+  — HMAC, offline Ed25519, per-coordinator Ed25519, and KMS/HSM-backed Ed25519
+  — so switching to asymmetric or hardware-backed keys does not silently open
+  a replay window. Future-dated timestamps are rejected as well.
 
 Set `AGENT_MESSAGE_AUTH=false` only for local debugging. For production,
 `AGENT_STRICT_PROD=1` replaces the symmetric cluster secret with
@@ -63,7 +67,10 @@ Key custody:
   `AGENT_KMS_SIGN_URL` (and optionally `AGENT_KMS_SIGN_TOKEN_FILE`). The private
   key never enters the mesh process. The endpoint receives a `POST` containing
   the exact bytes to raw-sign with Ed25519 and returns
-  `{"signature": "<hex or base64>"}`.
+  `{"signature": "<hex or base64>"}`. The raw-signing capability is defined by
+  the `Ed25519RawSigner` protocol (`__call__(bytes) -> bytes`); a PKCS#11, cloud
+  KMS or signing-sidecar adapter can be injected into `Ed25519KMSSigner` and
+  inherits the same freshness and key-set checks as any other backend.
 * A local private key (`AGENT_ED25519_PRIVATE_KEY_FILE`) is supported for CI
   signing jobs and development, and must not be mounted on runtime nodes.
 

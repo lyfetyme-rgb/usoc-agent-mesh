@@ -151,7 +151,9 @@ def build_signer(settings: Any) -> Signer | None:
         # or delegate signing to a KMS. No shared HMAC secret is required.
         from .asymmetric import build_ed25519_signer
 
-        return build_ed25519_signer(settings)
+        return build_ed25519_signer(
+            settings, max_age_s=int(getattr(settings, "max_message_age_s", 0) or 0)
+        )
     if mode not in ("hmac", "symmetric"):
         raise SecurityError(
             f"unknown AGENT_SIGNING_MODE {mode!r}; expected 'hmac' or 'ed25519'"
