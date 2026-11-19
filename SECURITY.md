@@ -913,6 +913,17 @@ keys: keep the old public key in the trust bundle while signing with the new
 records drain, then remove the retired key from the bundle. See the rotation
 steps in the sections above.
 
+## Known architectural trade-offs
+
+* **Shadow mode does not replay HITL approvals (Phase 2).** By design,
+  `AGENT_SHADOW_MODE` halts at HOLD → evidence and refuses approval consumption
+  to guarantee zero live-nonce side effects; isolated HITL approval replay is
+  scoped as a Phase 2 enhancement. This is deliberate: proving that shadow mode
+  cannot, under any circumstance, mint or consume a live approval nonce is a
+  stronger security property than simulating a human click. The ALLOW-suppression
+  path (evidence emitted, handler skipped) is covered by the negative tests in
+  `tests/test_shadow_mode.py` rather than by the default CLI demo.
+
 ## Residual risks
 
 * The Redis password appears in the mesh container's environment. Docker secrets
