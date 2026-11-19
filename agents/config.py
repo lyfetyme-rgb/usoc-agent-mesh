@@ -86,6 +86,8 @@ class Settings(BaseSettings):
     approval_oidc_jwks_url: str | None = None
     approval_oidc_sub_claim: str = "sub"
     approval_oidc_role_claim: str | None = None
+    # Claim carrying the per-approval binding digest (default: standard OIDC nonce).
+    approval_oidc_binding_claim: str = "nonce"
     approval_oidc_leeway_s: int = 60
     approval_oidc_timeout_s: float = 5.0
 

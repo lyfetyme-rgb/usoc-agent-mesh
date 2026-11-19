@@ -61,6 +61,7 @@ from .trust import (
     CoordinatorKeyring,
     approval_credential_payload,
     build_approval_verifier,
+    oidc_approval_binding,
     build_message_authority,
     load_approver_registry,
     validate_strict_prod,
@@ -1135,13 +1136,24 @@ def _add_credential_args(parser: argparse.ArgumentParser) -> None:
 
 
 def cmd_approval_payload(args: argparse.Namespace) -> int:
-    """Print the exact bytes a human must sign for a detached approval."""
+    """Print the exact bytes a human must sign for a detached approval.
+
+    With ``--oidc-binding``, print the digest an id_token must carry in its
+    binding claim (``nonce`` by default) to approve this exact decision.
+    """
     settings = _settings(args)
     store = _approval_store(settings, _signer(settings))
     req = asyncio.run(store.get(args.approval_id))
     if req is None:
         print(f"no such approval: {args.approval_id}")
         return 1
+    if getattr(args, "oidc_binding", False):
+        print(
+            oidc_approval_binding(
+                req, approved=args.approve, approver=args.by
+            )
+        )
+        return 0
     payload = approval_credential_payload(
         req, approved=args.approve, approver=args.by
     )
@@ -1235,6 +1247,11 @@ def build_parser() -> argparse.ArgumentParser:
     decision = approval_payload.add_mutually_exclusive_group(required=True)
     decision.add_argument("--approve", action="store_true", help="payload for an approval")
     decision.add_argument("--deny", action="store_true", help="payload for a denial")
+    approval_payload.add_argument(
+        "--oidc-binding",
+        action="store_true",
+        help="print the id_token binding digest instead of the detached-signature payload",
+    )
     serve = sub.add_parser("serve", help="start the mesh, health endpoint and recovery loop")
     serve.add_argument("--host", help="health bind address (default AGENT_HEALTH_HOST)")
     serve.add_argument("--port", type=int, help="health port (default AGENT_HEALTH_PORT)")

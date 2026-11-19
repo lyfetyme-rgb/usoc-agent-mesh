@@ -21,6 +21,7 @@ disables every fallback and ``agents doctor`` fails closed instead of warning.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ from .governance import (
     ApprovalCredential,
     ApprovalRequest,
     ApprovalVerification,
+    decision_payload_digest,
 )
 from .oidc import OIDCConfig, verify_id_token
 from .security import (
@@ -57,6 +59,7 @@ from .security import (
 
 MESSAGE_ALG = "ed25519"
 CREDENTIAL_SCOPE = "approval-credential/v1"
+OIDC_BINDING_SCOPE = "oidc-approval-binding/v1"
 
 
 # -- per-coordinator bus identities ------------------------------------------
@@ -417,6 +420,36 @@ def approval_credential_payload(
     )
 
 
+def oidc_approval_binding(
+    req: ApprovalRequest, *, approved: bool, approver: str
+) -> str:
+    """Digest an OIDC id_token must carry to authorize exactly this decision.
+
+    An id_token only proves *who* is logged in. Without a binding, a token
+    obtained for one approval can be replayed within its expiry window to
+    authorize a different request — a confused-deputy failure. The value
+    returned here commits to the approval id, its single-use nonce, the exact
+    decision payload (target, amount, currency, risk, taint, quorum, ...), the
+    approve/deny outcome and the approver identity. The human's login flow
+    places it in the token's configured binding claim (``nonce`` by default),
+    and the verifier recomputes it from the stored record before accepting.
+
+    The CLI exposes the exact value via
+    ``agents approval-payload <id> --by <name> --approve --oidc-binding``.
+    """
+    scope = {
+        "scope": OIDC_BINDING_SCOPE,
+        "approval_id": req.id,
+        "nonce": req.nonce or req.id,
+        "decision_digest": decision_payload_digest(req),
+        "approved": bool(approved),
+        "approver": str(approver).strip(),
+        "egress_target": req.egress_target,
+        "egress_payload_digest": req.egress_payload_digest,
+    }
+    return hashlib.sha256(canonical(scope)).hexdigest()
+
+
 class ApprovalVerifier:
     """Callable verifier for ``ApprovalStore(approver_verifier=...)``."""
 
@@ -535,6 +568,23 @@ class ApprovalVerifier:
                 return self._fail(
                     approver, "oidc", f"id_token lacks required role {entry.role!r}", entry
                 )
+        # Identity alone is not authority. The token must also commit to this
+        # exact approval, decision outcome and approver, or a valid token for
+        # one request could be replayed to authorize another.
+        expected = oidc_approval_binding(
+            req, approved=req.status.value == "approved", approver=approver
+        )
+        provided = claims.get(self.oidc.binding_claim)
+        provided = str(provided).strip() if provided is not None else ""
+        # Compare as bytes: a non-ASCII claim value must fail closed, not raise
+        # TypeError from str/str compare_digest.
+        if not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8")):
+            return self._fail(
+                approver,
+                "oidc",
+                f"id_token {self.oidc.binding_claim!r} claim is not bound to this approval",
+                entry,
+            )
         return self._verification(
             name=approver,
             method="oidc",
@@ -571,6 +621,9 @@ def build_approval_verifier(
             jwks_url=str(jwks_url),
             sub_claim=str(getattr(settings, "approval_oidc_sub_claim", "sub") or "sub"),
             role_claim=getattr(settings, "approval_oidc_role_claim", None),
+            binding_claim=str(
+                getattr(settings, "approval_oidc_binding_claim", "nonce") or "nonce"
+            ),
             leeway_s=int(getattr(settings, "approval_oidc_leeway_s", 60) or 0),
             timeout_s=float(getattr(settings, "approval_oidc_timeout_s", 5.0)),
         )

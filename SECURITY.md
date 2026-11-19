@@ -299,6 +299,18 @@ forms are supported, selected by `AGENT_APPROVAL_CREDENTIAL_MODE`
   `AGENT_APPROVAL_OIDC_ROLE_CLAIM` is set, the token must also contain the entry's
   `role`. JWKS responses are cached briefly; no JWT library is added.
 
+  An identity-only token is **not** sufficient authority. It must also carry a
+  per-approval binding digest in the claim named by
+  `AGENT_APPROVAL_OIDC_BINDING_CLAIM` (default: the standard OIDC `nonce`), or
+  verification fails with `verified: false`. Obtain the exact value with
+  `python -m agents approval-payload <id> --by alice --approve --oidc-binding`
+  and pass it as the authorization request nonce so the provider echoes it into
+  the token. The digest commits to the approval id, its single-use nonce, the
+  exact decision payload (including target, amount, currency, risk, taint,
+  quorum and egress binding), the approve/deny outcome and the approver. A
+  token minted for one approval therefore cannot authorize another, and a token
+  cannot be replayed after the target or amount is changed.
+
 HITL writes an `approval.verification` record to OEKP for every verified
 credential, including the method, key id/fingerprint or token subject, role and
 max tier. Rejected attempts are recorded with `verified: false`. The verification
