@@ -677,6 +677,38 @@ never clears the gate. Use
 wired into decision publication/bridge publication; other network paths are
 outside its scope, so keep the mesh network-segmented.
 
+### Shadow mode (observe-only)
+
+`AGENT_SHADOW_MODE=true` (or `python -m agents shadow`) is a deployment-level
+kill switch for *all* consequential side effects while preserving decision
+fidelity. It is designed for running the mesh alongside a live USOC process on
+real inputs. Shadow is strictly weaker than live — it can only add refusals:
+
+* **Execution:** `BaseAgent._on_task_body` still evaluates policy and still
+  emits `shadow.task`, `policy.decision` and `shadow.decision` evidence, but on
+  an `ALLOW` it returns a `TaskResult` with `data.shadow=true` **before**
+  `handle_task`; no tool, target or downstream sink is touched. `HOLD` and
+  `DENY` behave exactly as in live mode.
+* **State isolation:** `Mesh` resolves its workspace to `<workspace>/shadow`,
+  so approvals, evidence and publish state are physically separate. A shadow
+  approval store cannot spend a live nonce. `agents approve`/`deny` and
+  `publish-decision` are refused against a shadow configuration.
+* **Mutating tools:** `build_default_tools(..., allow_write=False)` keeps
+  `workspace.write`, `workspace.delete` and `evidence.append` registered but
+  makes their handlers raise `ToolError`; `BaseAgent._run_tool` independently
+  blocks the same names. Read-only tools remain available.
+* **Egress and bridge:** `EgressGuard(shadow=True)` raises before any signoff
+  check, so no payload leaves the process. `build_bridge()` returns `None` and
+  `AtlassianBridge.__init__` raises even when the bridge is otherwise fully
+  configured — no HTTP call, no Confluence page, no JSM request.
+* **Evidence:** each `EvidenceRecord` carries `shadow: bool` (hashed and MAC'd).
+  OEKP exports the flag, BENGAL totals `shadow_only`, and BENGAL withholds
+  `trusted_for_execution` for any chain containing shadow records — exactly as
+  it does for rehearsals and unmarked sandbox-origin records.
+
+Shadow mode does **not** relax policy, quorum, target/digest binding or signing.
+The negative guarantees are covered by `tests/test_shadow_mode.py`.
+
 ### Compliance exports
 
 The canonical store remains an append-only, hash/MAC-chained JSONL file.
@@ -835,6 +867,10 @@ docker compose --env-file .env.docker down
 - [ ] Connector tokens live in environment/secret stores, never in YAML.
 - [ ] `AGENT_ALLOW_WORKSPACE_DELETE` stays unset unless a workflow needs it.
 - [ ] Health port is bound to loopback or a private network, with a token.
+- [ ] For shadow deployments: `AGENT_SHADOW_MODE=true`, a dedicated
+      `<workspace>/shadow` path, bridge disabled, and egress denied end to end;
+      verify every chain record is `shadow: true` and BENGAL reports
+      `trusted_for_execution=false`.
 - [ ] `/data` is a persistent volume; evidence and approvals are backed up.
 - [ ] Redis is private, or TLS is enabled and the URL uses `rediss://`.
 - [ ] Logs are shipped somewhere tamper-resistant; `AGENT_LOG_JSON=true`.
@@ -877,6 +913,17 @@ keys: keep the old public key in the trust bundle while signing with the new
 records drain, then remove the retired key from the bundle. See the rotation
 steps in the sections above.
 
+## Known architectural trade-offs
+
+* **Shadow mode does not replay HITL approvals (Phase 2).** By design,
+  `AGENT_SHADOW_MODE` halts at HOLD → evidence and refuses approval consumption
+  to guarantee zero live-nonce side effects; isolated HITL approval replay is
+  scoped as a Phase 2 enhancement. This is deliberate: proving that shadow mode
+  cannot, under any circumstance, mint or consume a live approval nonce is a
+  stronger security property than simulating a human click. The ALLOW-suppression
+  path (evidence emitted, handler skipped) is covered by the negative tests in
+  `tests/test_shadow_mode.py` rather than by the default CLI demo.
+
 ## Residual risks
 
 * The Redis password appears in the mesh container's environment. Docker secrets
@@ -910,6 +957,10 @@ steps in the sections above.
   metadata and withholds `trusted_for_execution`, but it does not semantically
   prove that a governed action actually happened. Keep external execution
   audit independent of the evidence chain.
+* Shadow mode suppresses execution, mutating tools and egress in-process; it is
+  not a network-level sandbox. A compromised dependency that bypasses the agent
+  runtime entirely could still make outbound connections. Deploy shadow nodes
+  in a network-segmented zone with no egress route as defence in depth.
 * Connector data is untrusted and may be adversarial. Correlation limits the
   blast radius (bounded fields, redaction, no writes), but a compromised source
   can still create false incidents. Treat proposals as recommendations and keep

@@ -79,12 +79,16 @@ Each step below is complete unless marked **OPEN**.
 - **No live writes in CI or from tests.** Tests use injected HTTP transports.
   The only approved live write is an approval-gated, explicitly-enabled publish
   to a site you own.
+- **Shadow never executes, never writes.** `AGENT_SHADOW_MODE` runs real inputs
+  through policy/HITL/evidence, but handlers, mutating tools, egress and the
+  Atlassian bridge all fail closed. Shadow state is isolated under
+  `<workspace>/shadow` and every record is `shadow: true` (never execution proof).
 - **Stop at the demo.** Once tests pass and the storyboard is recorded, stop
   building. Resist "just one more feature."
 
 ## What "done" looks like
 
-- `python -m pytest -q` → **279 passed, 1 symlink skip**, no network.
+- `python -m pytest -q` → **291 passed, 1 symlink skip**, no network.
 - `git status` clean; local `HEAD` == `origin/main`; no unpushed hardening work.
 - `python -m agents doctor` reports Redis reachable, approvers configured,
   allowlist required.

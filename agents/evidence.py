@@ -40,6 +40,8 @@ class EvidenceRecord(BaseModel):
     origin: str | None = Field(default=None, max_length=128)
     tainted: bool = False
     rehearsal_only: bool = False
+    # Shadow records are observations, never execution proof. Covered by hash/MAC.
+    shadow: bool = False
     prev_hash: str = "genesis"
     hash: str = ""
     # Keyed MAC over the record. Hash chains detect edits; the MAC makes them
@@ -108,6 +110,7 @@ def render_export(
                     "origin",
                     "tainted",
                     "rehearsal_only",
+                    "shadow",
                     "data",
                     "prev_hash",
                     "hash",
@@ -130,6 +133,7 @@ def render_export(
     rehearsal = sum(1 for r in records if r.rehearsal_only or sandbox_origin(
         origin=r.origin, provenance=r.provenance, sender=r.subsystem
     ))
+    shadow = sum(1 for r in records if r.shadow)
     bengal = {
         "format": "bengal-assurance/v1",
         "assurance": "PASS" if verified else "FAIL",
@@ -139,6 +143,7 @@ def render_export(
             "tainted": sum(1 for r in records if r.tainted),
             "restricted": sum(1 for r in records if r.classification == "restricted"),
             "rehearsal_or_sandbox": rehearsal,
+            "shadow_only": shadow,
         },
         "by_kind": _counts("kind"),
         "by_actor": _counts("actor"),
@@ -239,6 +244,7 @@ class EvidenceChain:
         origin: str | None = None,
         tainted: bool = False,
         rehearsal_only: bool = False,
+        shadow: bool = False,
     ) -> EvidenceRecord:
         async with self._lock:
             self._load()
@@ -263,6 +269,7 @@ class EvidenceChain:
                     origin=origin,
                     tainted=bool(tainted),
                     rehearsal_only=bool(rehearsal_only),
+                    shadow=bool(shadow),
                     prev_hash=self._last_hash,
                 )
                 record.hash = record.compute_hash()

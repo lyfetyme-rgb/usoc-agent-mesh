@@ -141,8 +141,10 @@ TaskSpec
         +--------+---------+----------+-----------+
         |                  |          |           |
       DENY               HOLD       ALLOW      (never)
-   Failure          Handoff +     run handler,
-   to caller        approval id   attach refs
+   Failure          Handoff +     ALLOW + AGENT_SHADOW_MODE?
+   to caller        approval id        | yes -> record shadow.decision,
+                                      |        skip handler (no execution)
+                                      | no  -> run handler, attach refs
 ```
 
 `PolicyEngine` is deterministic Python. It has no model, no network and no
@@ -163,6 +165,7 @@ exception for urgency. An LLM cannot turn a DENY into an ALLOW.
 | approval does not cover this action, target and mission | **DENY** |
 | approval approved and covering | **ALLOW** + authorization ref (TTL 900 s) |
 | CYBER DEFENSE prohibited intent | **DENY** before the model runs |
+| `AGENT_SHADOW_MODE=true` with a policy ALLOW | **OBSERVE** — emit `shadow.decision` evidence, skip the handler; no tool/task/sink is touched |
 
 Default allowlist: `sandbox/*,staging/*`. An approval for `sandbox/node-1`
 cannot be replayed against `sandbox/node-2` or `prod/db-primary`; a wildcard
@@ -338,7 +341,11 @@ above is the buyer-facing label.
 
 OEKP appends. BENGAL independently recomputes and reports failure. The runtime
 also records `task.result` for every governed execution that produced an
-authorization.
+authorization. In shadow mode every record additionally carries a `shadow: true`
+flag (covered by hash/MAC); OEKP exports it, BENGAL totals `shadow_only`, and
+BENGAL withholds `trusted_for_execution` for chains containing shadow records.
+Shadow state lives under `<workspace>/shadow` so it cannot be mistaken for live
+evidence.
 
 ## 6. Delivery and failure semantics
 
@@ -611,7 +618,7 @@ and governance land before higher-risk autonomy.
 | C — Communication architecture | `contracts.py`, `bus.py`, this document | Protobuf/gRPC, authenticated service identity |
 | D — Implementation blueprint | package layout and composition root | service boundaries for role workers |
 | E — Security and governance | `governance.py`, `evidence.py`, `security.py`, `usoc_agents.py`, `egress.py`, `trust.py`, `oidc.py`, `profiles.py` | OPA/Rego, per-agent keys, signed authorization artifacts |
-| F — Test and verification | 279 passed + 1 symlink skip across contracts, bus, runtime, routing, governance, security, wave recovery, zero-trust tiers, role profiles and vertical controls | integration, performance, fault-injection suites |
+| F — Test and verification | 291 passed + 1 symlink skip across contracts, bus, runtime, routing, governance, security, wave recovery, zero-trust tiers, role profiles, vertical controls and shadow-mode negatives | integration, performance, fault-injection suites |
 | G — Phased roadmap | phases below | resource and delivery schedule |
 | H — Operational readiness | `health` and diagnostics | evidence-backed maturity assessment per subsystem |
 

@@ -157,6 +157,10 @@ class Settings(BaseSettings):
     # governance
     mission_id: str | None = None
     allowed_targets: str = "sandbox/*,staging/*"
+    # Shadow mode: consume real inputs and run policy/HITL/evidence, but never
+    # execute a consequential action or write to an external sink. Isolated
+    # workspace, tools, egress and bridge are enforced in code, not by convention.
+    shadow_mode: bool = False
 
     # Industry Starter Profiles. The profile only filters the capability-card
     # role *view*; all nine coordinators always run. Profile control defaults
