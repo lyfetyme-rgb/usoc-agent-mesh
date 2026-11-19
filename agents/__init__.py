@@ -3,6 +3,7 @@
 from .atlassian_bridge import AtlassianBridge, PublicationEnvelope, build_bridge
 from .asymmetric import (
     Ed25519KMSSigner,
+    Ed25519RawSigner,
     Ed25519Signer,
     Ed25519Verifier,
     PublicKeySet,
@@ -116,6 +117,7 @@ __all__ = [
     "DecisionType",
     "EchoLLM",
     "Ed25519KMSSigner",
+    "Ed25519RawSigner",
     "Ed25519Signer",
     "Ed25519Verifier",
     "PublicKeySet",

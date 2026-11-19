@@ -138,10 +138,14 @@ class CoordinatorKeyring:
             private_file = getattr(settings, "bus_signing_key_file", None)
             private_inline = getattr(settings, "bus_signing_key", None)
             kms_url = getattr(settings, "bus_kms_sign_url", None)
+            # Thread the same freshness contract into the managed signers that
+            # verify_message applies, so a signer used directly cannot silently
+            # accept a stale message.
+            max_age_s = int(getattr(settings, "max_message_age_s", 0) or 0)
             if private_file or private_inline:
                 private = load_private_key(private_inline, private_file)
                 signers[signing_agent] = Ed25519Signer(
-                    private, key_id=kid, key_set=key_set
+                    private, key_id=kid, key_set=key_set, max_age_s=max_age_s
                 )
             elif kms_url:
                 signers[signing_agent] = Ed25519KMSSigner(
@@ -156,6 +160,7 @@ class CoordinatorKeyring:
                         allowed_key_ids=set(keys.keys),
                     ),
                     key_id=kid,
+                    max_age_s=max_age_s,
                 )
         return cls(
             public,

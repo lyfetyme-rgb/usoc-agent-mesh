@@ -25,13 +25,26 @@ import binascii
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Protocol, runtime_checkable
 
 from .security import SecurityError, Signer, canonical, read_secret
 
 # Domain separation: an Ed25519 signature always covers scope, identity and the
 # record body, so a signature from one purpose cannot be replayed into another.
 SIGNATURE_DOMAIN = b"usoc-mesh/ed25519/v1\x00"
+
+
+@runtime_checkable
+class Ed25519RawSigner(Protocol):
+    """KMS/HSM seam: raw-sign the exact bytes, return a 64-byte signature.
+
+    Implementations receive the domain-separated canonical envelope and never
+    see a private key they could export. ``kms_http_signer`` returns one; a
+    PKCS#11, cloud KMS or signing-sidecar adapter can be injected into
+    :class:`Ed25519KMSSigner` without changing any call site.
+    """
+
+    def __call__(self, payload: bytes) -> bytes: ...
 
 
 def _material(value: str | None, file: str | Path | None, label: str) -> str:
@@ -191,6 +204,7 @@ class Ed25519Signer(Signer):
         public_key: Any | None = None,
         key_id: str = "default",
         key_set: PublicKeySet | None = None,
+        max_age_s: int = 0,
     ) -> None:
         self._private = private_key
         derived = private_key.public_key()
@@ -203,7 +217,9 @@ class Ed25519Signer(Signer):
         self.key_set = key_set
         self._public = key_set.active_key
         self.key_id = key_set.active_key_id
-        self.max_age_s = 0
+        # Freshness is enforced by the inherited Signer.verify_message, which
+        # is gated on this value. 0 keeps the historical no-expiry behavior.
+        self.max_age_s = max(0, int(max_age_s))
 
     @property
     def public_key_hex(self) -> str:
@@ -235,7 +251,13 @@ class Ed25519Verifier(Signer):
 
     algorithm = "ed25519"
 
-    def __init__(self, public_key: Any | PublicKeySet, *, key_id: str = "default") -> None:
+    def __init__(
+        self,
+        public_key: Any | PublicKeySet,
+        *,
+        key_id: str = "default",
+        max_age_s: int = 0,
+    ) -> None:
         self.key_set = (
             public_key
             if isinstance(public_key, PublicKeySet)
@@ -243,7 +265,7 @@ class Ed25519Verifier(Signer):
         )
         self._public = self.key_set.active_key
         self.key_id = self.key_set.active_key_id
-        self.max_age_s = 0
+        self.max_age_s = max(0, int(max_age_s))
 
     @property
     def public_key_hex(self) -> str:
@@ -278,11 +300,12 @@ class Ed25519KMSSigner(Ed25519Verifier):
     def __init__(
         self,
         public_key: Any | PublicKeySet,
-        sign: Callable[[bytes], bytes],
+        sign: Ed25519RawSigner,
         *,
         key_id: str = "default",
+        max_age_s: int = 0,
     ) -> None:
-        super().__init__(public_key, key_id=key_id)
+        super().__init__(public_key, key_id=key_id, max_age_s=max_age_s)
         self._sign = sign
 
     def sign_record(self, scope: str, body: dict[str, Any], identity: str = "") -> str:
@@ -297,7 +320,7 @@ def kms_http_signer(
     token: str | None = None,
     timeout_s: float = 5.0,
     allowed_key_ids: set[str] | None = None,
-) -> Callable[[bytes], bytes]:
+) -> Ed25519RawSigner:
     """Build a KMS signing callable for a small HTTP contract.
 
     Request:  POST <url> with the exact canonical bytes to raw-sign (Ed25519,
@@ -336,7 +359,9 @@ def kms_http_signer(
     return sign
 
 
-def build_ed25519_signer(settings: Any) -> Ed25519Verifier | Ed25519Signer:
+def build_ed25519_signer(
+    settings: Any, *, max_age_s: int = 0
+) -> Ed25519Verifier | Ed25519Signer | Ed25519KMSSigner:
     """Construct the Ed25519 backend from settings, failing closed.
 
     * private key present  -> offline/CI signer (development or signing job)
@@ -372,6 +397,7 @@ def build_ed25519_signer(settings: Any) -> Ed25519Verifier | Ed25519Signer:
             public_key=key_set.active_key,
             key_id=key_id,
             key_set=key_set,
+            max_age_s=max_age_s,
         )
 
     if kms_url:
@@ -388,8 +414,9 @@ def build_ed25519_signer(settings: Any) -> Ed25519Verifier | Ed25519Signer:
                 allowed_key_ids=set(key_set.keys),
             ),
             key_id=key_id,
+            max_age_s=max_age_s,
         )
-    return Ed25519Verifier(key_set, key_id=key_id)
+    return Ed25519Verifier(key_set, key_id=key_id, max_age_s=max_age_s)
 
 
 def configured_key_set(settings: Any, *, private_key: Any | None = None) -> PublicKeySet:

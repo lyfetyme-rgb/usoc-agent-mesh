@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import argparse
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from agents.asymmetric import (
     Ed25519KMSSigner,
+    Ed25519RawSigner,
     Ed25519Signer,
     Ed25519Verifier,
     PublicKeySet,
+    build_ed25519_signer,
     generate_keypair,
     kms_http_signer,
     load_public_key,
@@ -82,6 +85,144 @@ def test_message_signatures_round_trip_and_reject_edits():
         update={"payload": signed.payload.model_copy(update={"objective": "do something else"})}
     )
     assert verifier.verify_message(tampered)[0] is False
+
+
+def _old_message(minutes: int = 5) -> Message:
+    return Message.task(sender="a", recipient="b", objective="work").model_copy(
+        update={"created_at": datetime.now(timezone.utc) - timedelta(minutes=minutes)}
+    )
+
+
+def test_build_signer_ed25519_enforces_message_freshness():
+    """Global ed25519 mode must honor AGENT_MAX_MESSAGE_AGE_S (the core bug)."""
+    private, public = keypair()
+    settings = Settings(
+        signing_mode="ed25519",
+        ed25519_private_key=private_key_pem(private),
+        ed25519_public_key=public_key_hex(public),
+        max_message_age_s=30,
+    )
+    signer = build_signer(settings)
+    assert isinstance(signer, Ed25519Signer)
+
+    ok, detail = signer.verify_message(signer.sign_message(_old_message()))
+    assert not ok
+    assert "too old" in detail
+
+    # Positive control: a freshly created message is still accepted.
+    fresh = Message.task(sender="a", recipient="b", objective="work")
+    ok, detail = signer.verify_message(signer.sign_message(fresh))
+    assert ok, detail
+
+
+def test_ed25519_verification_only_enforces_message_freshness():
+    """A public-key-only runtime node rejects a stale signed message."""
+    private, public = keypair()
+    verifier = build_signer(
+        Settings(
+            signing_mode="ed25519",
+            ed25519_public_key=public_key_hex(public),
+            max_message_age_s=30,
+        )
+    )
+    assert isinstance(verifier, Ed25519Verifier)
+    stale = Ed25519Signer(private).sign_message(_old_message())
+    ok, detail = verifier.verify_message(stale)
+    assert not ok
+    assert "too old" in detail
+
+
+def test_ed25519_kms_signer_enforces_message_freshness():
+    """KMS/HSM-backed signing inherits the same freshness contract."""
+    private, public = keypair()
+
+    def kms_sign(payload: bytes) -> bytes:
+        return private.sign(payload)
+
+    assert isinstance(kms_sign, Ed25519RawSigner)  # custom adapter is a valid seam
+    signer = Ed25519KMSSigner(public, kms_sign, key_id="kms-2026", max_age_s=30)
+    ok, detail = signer.verify_message(signer.sign_message(_old_message()))
+    assert not ok
+    assert "too old" in detail
+
+    fresh = Message.task(sender="a", recipient="b", objective="work")
+    ok, detail = signer.verify_message(signer.sign_message(fresh))
+    assert ok, detail
+
+
+def test_ed25519_freshness_constructor_clamps_and_defaults():
+    private, public = keypair()
+    assert Ed25519Signer(private).max_age_s == 0
+    assert Ed25519Verifier(public).max_age_s == 0
+    assert Ed25519Signer(private, max_age_s=30).max_age_s == 30
+    assert Ed25519Verifier(public, max_age_s=30).max_age_s == 30
+    assert Ed25519Signer(private, max_age_s=-5).max_age_s == 0
+    assert Ed25519Verifier(public, max_age_s=-5).max_age_s == 0
+
+
+def test_ed25519_rejects_future_timestamp():
+    private, _ = keypair()
+    signer = Ed25519Signer(private, max_age_s=30)
+    future = Message.task(sender="a", recipient="b", objective="work").model_copy(
+        update={"created_at": datetime.now(timezone.utc) + timedelta(minutes=5)}
+    )
+    ok, detail = signer.verify_message(signer.sign_message(future))
+    assert not ok
+    assert "in the future" in detail
+
+
+def test_ed25519_freshness_disabled_by_default_preserves_compatibility():
+    """max_age_s=0 keeps the historical no-expiry behavior."""
+    private, public = keypair()
+    signer = build_signer(
+        Settings(
+            signing_mode="ed25519",
+            ed25519_private_key=private_key_pem(private),
+            ed25519_public_key=public_key_hex(public),
+        )
+    )
+    ok, detail = signer.verify_message(signer.sign_message(_old_message(minutes=60)))
+    assert ok, detail
+
+
+def test_build_ed25519_signer_threads_freshness_to_all_backends(monkeypatch):
+    private, public = keypair()
+    pub_hex = public_key_hex(public)
+
+    local = build_ed25519_signer(
+        Settings(
+            signing_mode="ed25519",
+            ed25519_private_key=private_key_pem(private),
+            ed25519_public_key=pub_hex,
+        ),
+        max_age_s=30,
+    )
+    assert isinstance(local, Ed25519Signer) and local.max_age_s == 30
+
+    verify_only = build_ed25519_signer(
+        Settings(signing_mode="ed25519", ed25519_public_key=pub_hex), max_age_s=30
+    )
+    assert isinstance(verify_only, Ed25519Verifier) and verify_only.max_age_s == 30
+
+    import httpx
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"signature": "ab" * 64}
+
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: FakeResponse())
+    kms = build_ed25519_signer(
+        Settings(
+            signing_mode="ed25519",
+            ed25519_public_key=pub_hex,
+            kms_sign_url="https://kms.invalid/sign",
+        ),
+        max_age_s=30,
+    )
+    assert isinstance(kms, Ed25519KMSSigner) and kms.max_age_s == 30
 
 
 def test_build_signer_prefers_a_local_private_key_for_signing():
