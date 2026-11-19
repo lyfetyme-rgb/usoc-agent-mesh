@@ -88,7 +88,7 @@ Each step below is complete unless marked **OPEN**.
 
 ## What "done" looks like
 
-- `python -m pytest -q` → **291 passed, 1 symlink skip**, no network.
+- `python -m pytest -q` → **295 passed, 1 symlink skip**, no network.
 - `git status` clean; local `HEAD` == `origin/main`; no unpushed hardening work.
 - `python -m agents doctor` reports Redis reachable, approvers configured,
   allowlist required.

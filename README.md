@@ -46,7 +46,7 @@ python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --vertical finance      # transaction gate + dual HITL
 python -m agents demo-fragmentation --vertical healthcare   # PII/PHI taint + signed egress
-python -m pytest -q              # 291 passed, 1 env-gated skip, no network
+python -m pytest -q              # 295 passed, 1 env-gated skip, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
@@ -73,7 +73,7 @@ the bridge is opt-in and its tests use an injected HTTP transport.
 
 | Time | Show | Point |
 |---|---|---|
-| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 291 passing with 1 symlink skip. |
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 295 passing with 1 symlink skip. |
 | 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
 | 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
 | 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |
@@ -662,13 +662,18 @@ pass an Okta/Entra `id_token` whose `sub` matches the registry id:
 ```powershell
 python -m agents approval-payload apr-89d9db2cba --by alice --approve
 python -m agents approve apr-89d9db2cba --by alice --signature-file /run/secrets/alice.sig
-# OIDC alternative:
+# OIDC alternative: get the per-approval nonce, put it in the login request,
+# then submit the token the provider returns:
+python -m agents approval-payload apr-89d9db2cba --by alice --approve --oidc-binding
 python -m agents approve apr-89d9db2cba --by alice --id-token-file /run/secrets/alice.idtoken
 ```
 
 HITL verifies the credential against the signed registry (or the configured
 JWKS) and writes an `approval.verification` record to OEKP; failed attempts are
-recorded with `verified: false`. Configure OIDC with
+recorded with `verified: false`. An OIDC token must carry the per-approval
+binding digest in its `nonce` claim (override the claim name with
+`AGENT_APPROVAL_OIDC_BINDING_CLAIM`); a token for a different approval, target,
+amount or decision is rejected. Configure OIDC with
 `AGENT_APPROVAL_OIDC_ISSUER`, `AGENT_APPROVAL_OIDC_AUDIENCE`,
 `AGENT_APPROVAL_OIDC_JWKS_URL` and optionally `AGENT_APPROVAL_OIDC_ROLE_CLAIM`.
 See [SECURITY.md](SECURITY.md#production-trust-mode-agent_strict_prod) for the
