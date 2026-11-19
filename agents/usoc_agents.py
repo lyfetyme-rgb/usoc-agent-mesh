@@ -214,6 +214,7 @@ class OekpAgent(SubsystemAgent):
             origin=origin,
             tainted=bool(spec.tainted),
             rehearsal_only=rehearsal_only,
+            shadow=bool(getattr(getattr(self, "settings", None), "shadow_mode", False)),
             data={"objective": spec.objective, "inputs": spec.inputs},
         )
         self.metrics.inc("evidence.appended")

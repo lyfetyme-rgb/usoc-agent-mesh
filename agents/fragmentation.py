@@ -309,6 +309,7 @@ class FragmentationService:
             classification=classification,
             data=data,
             tainted=tainted,
+            shadow=bool(getattr(self.settings, "shadow_mode", False)),
         )
         self._evidence_refs.append(record.id)
         return record.id

@@ -26,9 +26,11 @@ from agents.contracts import (
     Message,
     RiskLevel,
     TaskResult,
+    TaskSpec,
 )
 from agents.egress import EgressError, EgressGuard
 from agents.evidence import EvidenceChain, render_export
+from agents.fragmentation import FragmentationService
 from agents.governance import (
     ApprovalRequest,
     ApprovalStatus,
@@ -42,7 +44,7 @@ from agents.runtime import SubsystemAgent
 from agents.security import SecurityError, Signer
 from agents.store import InMemoryStore
 from agents.tools import ToolError, build_default_tools
-from agents.usoc_agents import BengalAgent
+from agents.usoc_agents import BengalAgent, OekpAgent
 
 EGRESS_TARGET = "atlassian:https://example.atlassian.net"
 PAYLOAD_DIGEST = "a" * 64
@@ -277,6 +279,53 @@ async def test_mutating_tools_fail_closed_but_stay_registered(settings, tmp_path
 
 
 # -- evidence and BENGAL -----------------------------------------------------
+
+async def test_oekp_direct_append_is_shadow_marked(settings, tmp_path):
+    """OEKP's own handler must mark records when settings enable shadow mode."""
+    shadow_settings = settings.model_copy(update={"shadow_mode": True})
+    chain = EvidenceChain(tmp_path / "oekp.jsonl")
+    agent = OekpAgent(
+        SubsystemSpec(
+            id="oekp",
+            name="OEKP",
+            description="shadow-test evidence writer.",
+            capabilities=["evidence"],
+        ),
+        InMemoryBus(insecure_dev_mode=True),
+        llm=None,
+        tools=None,
+        settings=shadow_settings,
+        store=InMemoryStore(),
+        metrics=Metrics(),
+        known_agents=set(),
+        policy=None,
+        evidence=chain,
+        approvals=None,
+    )
+    result = await agent.handle_task(
+        TaskSpec(objective="record an observation", inputs={"kind": "test.event"}),
+        Message.task(sender="client", recipient="oekp", objective="record an observation"),
+    )
+    assert result.ok, result.error
+    records = chain.records()
+    assert len(records) == 1
+    assert records[0].shadow is True, "direct OEKP append lost its shadow marking"
+    ok, detail = chain.verify()
+    assert ok, detail
+
+
+async def test_fragmentation_direct_append_is_shadow_marked(settings, tmp_path):
+    """Fragmentation's own audit path must mark records in shadow mode."""
+    shadow_settings = settings.model_copy(update={"shadow_mode": True})
+    chain = EvidenceChain(tmp_path / "fragmentation.jsonl")
+    service = FragmentationService([], evidence=chain, settings=shadow_settings)
+    await service._audit("test.event", {"objective": "observe"})
+    records = chain.records()
+    assert len(records) == 1
+    assert records[0].shadow is True, "direct fragmentation append lost its shadow marking"
+    ok, detail = chain.verify()
+    assert ok, detail
+
 
 def test_shadow_evidence_exports_and_is_not_execution_proof(tmp_path):
     chain = EvidenceChain(tmp_path / "chain.jsonl")
