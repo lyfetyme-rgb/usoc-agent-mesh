@@ -728,6 +728,39 @@ real inputs. Shadow is strictly weaker than live — it can only add refusals:
 Shadow mode does **not** relax policy, quorum, target/digest binding or signing.
 The negative guarantees are covered by `tests/test_shadow_mode.py`.
 
+### Live LLM rehearsal (staged rollout)
+
+`python -m agents llm-rehearsal` is the observation-only harness for staging a
+live model before it joins the mesh. It is the bridge between an
+`AGENT_LLM_BASE_URL` connector and the deterministic policy: it sends labeled
+prompts from `fixtures/llm_rehearsal/cases.jsonl`, screens the **untrusted**
+model output with `PolicyEngine.screen_text`, evaluates it as tainted
+(`llm-rehearsal` / `untrusted-model-output` provenance), and records latency,
+tokens, screen hits and HOLD/DENY accuracy — with **zero execution**. It never
+builds a `Mesh`, calls a task handler, runs a tool, consumes an approval or
+writes to an external sink.
+
+* **Zero egress by default.** Without `--live` the harness injects `EchoLLM` and
+  makes no network call; `--live` is the only path to `AGENT_LLM_BASE_URL` and
+  fails closed when no base URL is set. Shadow mode does not block the model
+  HTTP request itself — the harness gates it explicitly.
+* **Rehearsal evidence is never execution proof.** Every record is signed by the
+  same `build_signer(settings)` trust root as the mesh and hard-coded
+  `rehearsal_only=true`, `shadow=true` and `tainted=true`, with provenance that
+  trips `sandbox_origin()`. OEKP exports the flags and BENGAL withholds
+  `trusted_for_execution`. A fresh run id and a per-record nonce live inside the
+  signed payload next to the SHA-256 prompt/response digests, so a prior run
+  cannot be replayed as a new one. Credentials and API keys are never logged;
+  endpoint URLs are redacted.
+* **Expectations cannot assert success.** A `RehearsalCase` may only expect HOLD
+  or DENY — an `ALLOW` expectation is rejected at validation time, because an
+  ALLOW in a rehearsal is never proof that a governed action happened.
+* **Known limitation.** `screen_text` is NFKC + casefold substring matching,
+  not a semantic jailbreak detector; the `jailbreak-instruction` fixture
+  deliberately expects no hit to make this gap explicit.
+
+The negative guarantees are covered by `tests/test_llm_rehearsal.py`.
+
 ### Compliance exports
 
 The canonical store remains an append-only, hash/MAC-chained JSONL file.
@@ -979,7 +1012,10 @@ steps in the sections above.
 * Shadow mode suppresses execution, mutating tools and egress in-process; it is
   not a network-level sandbox. A compromised dependency that bypasses the agent
   runtime entirely could still make outbound connections. Deploy shadow nodes
-  in a network-segmented zone with no egress route as defence in depth.
+  in a network-segmented zone with no egress route as defence in depth. In
+  particular, shadow mode does not stop `OpenAICompatibleLLM` HTTP calls; the
+  `llm-rehearsal` harness gates model egress behind its explicit `--live` flag,
+  but a live endpoint is still outside the policy decision path.
 * Connector data is untrusted and may be adversarial. Correlation limits the
   blast radius (bounded fields, redaction, no writes), but a compromised source
   can still create false incidents. Treat proposals as recommendations and keep
