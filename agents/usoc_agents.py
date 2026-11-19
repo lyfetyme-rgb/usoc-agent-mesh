@@ -242,19 +242,25 @@ class BengalAgent(SubsystemAgent):
         head_seq, head_hash = self.evidence.head
         records = self.evidence.records()
         rehearsals = [r for r in records if r.rehearsal_only]
+        shadow_records = [r for r in records if r.shadow]
         untrusted_sandbox = [
             r
             for r in records
             if not r.rehearsal_only
+            and not r.shadow
             and sandbox_origin(origin=r.origin, provenance=r.provenance)
         ]
         self.metrics.inc("bengal.verified")
         notes = [detail]
         if rehearsals:
             notes.append(f"{len(rehearsals)} rehearsal-only record(s) are not execution proof")
+        if shadow_records:
+            notes.append(f"{len(shadow_records)} shadow record(s) are not execution proof")
         if untrusted_sandbox:
             notes.append(f"{len(untrusted_sandbox)} unmarked sandbox-origin record(s) found")
-        trusted_for_execution = ok and not rehearsals and not untrusted_sandbox
+        trusted_for_execution = (
+            ok and not rehearsals and not shadow_records and not untrusted_sandbox
+        )
         return TaskResult(
             ok=ok,
             output="evidence chain: " + "; ".join(notes),
@@ -266,6 +272,8 @@ class BengalAgent(SubsystemAgent):
                 "checked": "evidence.integrity",
                 "rehearsal_only_count": len(rehearsals),
                 "rehearsal_ids": [r.id for r in rehearsals],
+                "shadow_only_count": len(shadow_records),
+                "shadow_ids": [r.id for r in shadow_records],
                 "untrusted_sandbox_count": len(untrusted_sandbox),
                 "trusted_for_execution": trusted_for_execution,
             },

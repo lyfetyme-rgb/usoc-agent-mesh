@@ -10,6 +10,7 @@ One source per claim. If two disagree, this list decides which is truth.
 | Repo layout | `README.md` |
 | Threat model, controls, bridge, rotation, audit | `SECURITY.md` |
 | Message lifecycle, governance gate, failure matrix | `docs/architecture.md` |
+| Shadow-mode semantics (no execution/writes, isolation, evidence) | `SECURITY.md` |
 | Subsystem roles and routing | `subsystems.yaml` |
 | Decision record for Ed25519 | Confluence `testing-bay`, space SD, page 786434 |
 | Follow-up work | Jira `testing-bay`, project KAN (KAN-1…4) |

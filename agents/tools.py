@@ -240,6 +240,7 @@ def build_default_tools(
     evidence: Any | None = None,
     *,
     allow_delete: bool = False,
+    allow_write: bool = True,
 ) -> ToolRegistry:
     registry = ToolRegistry()
 
@@ -247,6 +248,8 @@ def build_default_tools(
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     async def write(path: str, content: str, append: bool = False) -> str:
+        if not allow_write:
+            raise ToolError("shadow mode: mutating tools are disabled")
         target = _safe(workspace, path)
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a" if append else "w", encoding="utf-8") as fh:
@@ -276,6 +279,8 @@ def build_default_tools(
         return sorted(found)[:limit]
 
     async def delete(path: str) -> str:
+        if not allow_write:
+            raise ToolError("shadow mode: mutating tools are disabled")
         target = _safe(workspace, path)
         if target.is_dir():
             shutil.rmtree(target)
@@ -338,6 +343,8 @@ def build_default_tools(
         async def evidence_append(
             kind: str, actor: str, data: dict[str, Any] | None = None, correlation_id: str = "", classification: str = "internal"
         ) -> dict[str, Any]:
+            if not allow_write:
+                raise ToolError("shadow mode: mutating tools are disabled")
             record = await evidence.append(
                 kind=kind,
                 actor=actor,
@@ -346,13 +353,6 @@ def build_default_tools(
                 classification=classification,
             )
             return {"id": record.id, "seq": record.seq, "hash": record.hash}
-
-        async def evidence_verify() -> dict[str, Any]:
-            ok, detail = evidence.verify()
-            return {"ok": ok, "detail": detail}
-
-        async def evidence_read(limit: int = 20) -> list[dict[str, Any]]:
-            return [r.model_dump(mode="json") for r in evidence.records(limit=limit)]
 
         registry.register(
             ToolSpec(
@@ -373,6 +373,14 @@ def build_default_tools(
                 handler=evidence_append,
             )
         )
+
+        async def evidence_verify() -> dict[str, Any]:
+            ok, detail = evidence.verify()
+            return {"ok": ok, "detail": detail}
+
+        async def evidence_read(limit: int = 20) -> list[dict[str, Any]]:
+            return [r.model_dump(mode="json") for r in evidence.records(limit=limit)]
+
         registry.register(
             ToolSpec(
                 name="evidence.verify",
