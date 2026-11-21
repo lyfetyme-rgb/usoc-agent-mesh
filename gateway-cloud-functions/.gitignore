@@ -1,0 +1,6 @@
+/functions/lib/
+.firebaserc
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+coverage/
