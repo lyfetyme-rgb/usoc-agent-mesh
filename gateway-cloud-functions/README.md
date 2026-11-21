@@ -1,7 +1,7 @@
 # Gateway Cloud Functions
 
 Self-contained Firebase Cloud Functions (TypeScript, Node 20) for ROK-01 facility
-gateway telemetry. It implements four functions:
+gateway telemetry. It implements five functions:
 
 | Function | Type | Purpose |
 | --- | --- | --- |
@@ -10,6 +10,7 @@ gateway telemetry. It implements four functions:
 | `dispatchAlertNotification` | Firestore trigger | Texts the on-duty technician with a one-tap deep link on new alerts |
 | `dispatchCustomerRequestNotification` | Firestore trigger | Texts the on-duty technician when a Customer Request Form is created |
 | `provisionTenantAndGateway` | HTTPS (admin) | Creates a tenant + gateway, discloses the raw token once, returns the printable QR sticker URL |
+| `issueHliftAssertion` | HTTPS (IdP callback) | Verifies the IdP session, issues the signed `hlift_assertion` cookie for H-LIFT, redirects to the app |
 
 All Firestore access uses the Admin SDK. Client reads/writes are denied by
 `firestore.rules` — telemetry can only enter through the HTTPS data diode.
@@ -27,7 +28,7 @@ gateway-cloud-functions/
     src/config.ts             # env-backed configuration
     src/types.ts              # Firestore document shapes
     src/lib/                  # auth, validation, rollups, alerts, QR, Twilio, heartbeat
-    src/functions/            # the four function handlers
+    src/functions/            # the five function handlers
     test/                     # Vitest unit + handler tests (in-memory Firestore fake)
 ```
 
@@ -125,6 +126,30 @@ Side effects in one transaction:
    cleared if this packet ends an offline episode.
 4. Breach alerts opened/updated or cleared per metric.
 5. Token doc marked `activatedAt` / `lastUsedAt`.
+
+### `GET|POST /issueHliftAssertion`
+
+H-LIFT signed-assertion (Zero Trust) callback. Authenticates with the IdP
+session cookie (`HLIFT_IDP_SESSION_COOKIE`, default `__session`), verified by
+Firebase Admin with revocation checking. Server-to-server callers may use
+`Authorization: Bearer <firebase-id-token>` instead. There is no request body:
+the verified uid is mapped to an H-LIFT subject through `HLIFT_SUBJECT_MAP` and
+must also appear in `HLIFT_ALLOWED_SUBJECTS`.
+
+Successful response: `302` to `APP_BASE_URL` with `Cache-Control: no-store` and:
+
+```
+Set-Cookie: hlift_assertion=<HS256 JWT>; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=3600
+Set-Cookie: hlift_subject=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0
+```
+
+Set `HLIFT_COOKIE_DOMAIN` only when the gateway and H-LIFT live on different
+subdomains of one registrable domain. H-LIFT must use the same
+`HLIFT_IDP_HMAC_SECRET`, `HLIFT_IDP_ISSUER` and `HLIFT_IDP_AUDIENCE`, with
+`HLIFT_ZERO_TRUST=1`.
+
+Responses: `302` issued, `401` missing/invalid IdP credential, `403` unmapped
+uid or subject outside the allowlist, `405` wrong method.
 
 ### `POST /provisionTenantAndGateway`
 
