@@ -178,6 +178,8 @@ class AtlassianBridge:
         transport: HttpTransport | None = None,
         state_path: str | Path | None = None,
     ) -> None:
+        if getattr(settings, "shadow_mode", False):
+            raise SecurityError("Atlassian bridge is disabled in shadow mode")
         if not getattr(settings, "atlassian_bridge_enabled", False):
             raise SecurityError("Atlassian bridge is disabled")
         base_url = str(getattr(settings, "atlassian_base_url", "") or "").strip().rstrip("/")
@@ -396,6 +398,8 @@ class AtlassianBridge:
 
 def build_bridge(settings: Any, signer: Any, **kwargs: Any) -> AtlassianBridge | None:
     """Return a bridge when enabled, otherwise ``None`` (no external writes)."""
+    if getattr(settings, "shadow_mode", False):
+        return None
     if not getattr(settings, "atlassian_bridge_enabled", False):
         return None
     return AtlassianBridge(settings, signer, **kwargs)

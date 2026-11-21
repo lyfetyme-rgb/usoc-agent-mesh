@@ -9,8 +9,10 @@ private keys stay with the identity provider.
 The verifier checks the JOSE header algorithm, key id, signature, issuer,
 audience, expiry and not-before claims. It deliberately returns the full claim
 set so the caller can bind ``sub`` (or a configured claim) to an entry in the
-signed approver registry. JWKS responses are cached for a short TTL to avoid a
-network round trip on every approval.
+signed approver registry *and* bind the token to one exact decision (see
+``ApprovalVerifier`` and ``oidc_approval_binding``). An identity-only token is
+never sufficient to approve a request. JWKS responses are cached for a short
+TTL to avoid a network round trip on every approval.
 """
 
 from __future__ import annotations
@@ -40,6 +42,11 @@ class OIDCConfig:
     jwks_url: str
     sub_claim: str = "sub"
     role_claim: str | None = None
+    # Claim that carries the approval binding digest. Defaults to the standard
+    # OIDC ``nonce`` so no custom IdP claim is required: the human's login flow
+    # passes the value printed by ``agents approval-payload --oidc-binding`` as
+    # the authorization request nonce, and the provider echoes it in the token.
+    binding_claim: str = "nonce"
     leeway_s: int = 60
     timeout_s: float = 5.0
 
@@ -53,6 +60,8 @@ class OIDCConfig:
             raise SecurityError("AGENT_APPROVAL_OIDC_JWKS_URL must use https")
         if not self.sub_claim:
             raise SecurityError("AGENT_APPROVAL_OIDC_SUB_CLAIM must not be empty")
+        if not self.binding_claim:
+            raise SecurityError("AGENT_APPROVAL_OIDC_BINDING_CLAIM must not be empty")
 
 
 def _b64decode(segment: str) -> bytes:

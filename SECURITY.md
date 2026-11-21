@@ -33,6 +33,10 @@ without the secret.
   (`mesh:dlq` on Redis, `bus.dlq` in memory). They are never handed to an agent.
 * `AGENT_MAX_MESSAGE_AGE_S` optionally rejects old messages. It is off by
   default because at-least-once delivery can legitimately redeliver a message.
+  When set, the same freshness contract applies uniformly to every signing mode
+  — HMAC, offline Ed25519, per-coordinator Ed25519, and KMS/HSM-backed Ed25519
+  — so switching to asymmetric or hardware-backed keys does not silently open
+  a replay window. Future-dated timestamps are rejected as well.
 
 Set `AGENT_MESSAGE_AUTH=false` only for local debugging. For production,
 `AGENT_STRICT_PROD=1` replaces the symmetric cluster secret with
@@ -63,7 +67,10 @@ Key custody:
   `AGENT_KMS_SIGN_URL` (and optionally `AGENT_KMS_SIGN_TOKEN_FILE`). The private
   key never enters the mesh process. The endpoint receives a `POST` containing
   the exact bytes to raw-sign with Ed25519 and returns
-  `{"signature": "<hex or base64>"}`.
+  `{"signature": "<hex or base64>"}`. The raw-signing capability is defined by
+  the `Ed25519RawSigner` protocol (`__call__(bytes) -> bytes`); a PKCS#11, cloud
+  KMS or signing-sidecar adapter can be injected into `Ed25519KMSSigner` and
+  inherits the same freshness and key-set checks as any other backend.
 * A local private key (`AGENT_ED25519_PRIVATE_KEY_FILE`) is supported for CI
   signing jobs and development, and must not be mounted on runtime nodes.
 
@@ -298,6 +305,18 @@ forms are supported, selected by `AGENT_APPROVAL_CREDENTIAL_MODE`
   `AGENT_APPROVAL_OIDC_SUB_CLAIM`) to the registry id. If
   `AGENT_APPROVAL_OIDC_ROLE_CLAIM` is set, the token must also contain the entry's
   `role`. JWKS responses are cached briefly; no JWT library is added.
+
+  An identity-only token is **not** sufficient authority. It must also carry a
+  per-approval binding digest in the claim named by
+  `AGENT_APPROVAL_OIDC_BINDING_CLAIM` (default: the standard OIDC `nonce`), or
+  verification fails with `verified: false`. Obtain the exact value with
+  `python -m agents approval-payload <id> --by alice --approve --oidc-binding`
+  and pass it as the authorization request nonce so the provider echoes it into
+  the token. The digest commits to the approval id, its single-use nonce, the
+  exact decision payload (including target, amount, currency, risk, taint,
+  quorum and egress binding), the approve/deny outcome and the approver. A
+  token minted for one approval therefore cannot authorize another, and a token
+  cannot be replayed after the target or amount is changed.
 
 HITL writes an `approval.verification` record to OEKP for every verified
 credential, including the method, key id/fingerprint or token subject, role and
@@ -677,6 +696,71 @@ never clears the gate. Use
 wired into decision publication/bridge publication; other network paths are
 outside its scope, so keep the mesh network-segmented.
 
+### Shadow mode (observe-only)
+
+`AGENT_SHADOW_MODE=true` (or `python -m agents shadow`) is a deployment-level
+kill switch for *all* consequential side effects while preserving decision
+fidelity. It is designed for running the mesh alongside a live USOC process on
+real inputs. Shadow is strictly weaker than live — it can only add refusals:
+
+* **Execution:** `BaseAgent._on_task_body` still evaluates policy and still
+  emits `shadow.task`, `policy.decision` and `shadow.decision` evidence, but on
+  an `ALLOW` it returns a `TaskResult` with `data.shadow=true` **before**
+  `handle_task`; no tool, target or downstream sink is touched. `HOLD` and
+  `DENY` behave exactly as in live mode.
+* **State isolation:** `Mesh` resolves its workspace to `<workspace>/shadow`,
+  so approvals, evidence and publish state are physically separate. A shadow
+  approval store cannot spend a live nonce. `agents approve`/`deny` and
+  `publish-decision` are refused against a shadow configuration.
+* **Mutating tools:** `build_default_tools(..., allow_write=False)` keeps
+  `workspace.write`, `workspace.delete` and `evidence.append` registered but
+  makes their handlers raise `ToolError`; `BaseAgent._run_tool` independently
+  blocks the same names. Read-only tools remain available.
+* **Egress and bridge:** `EgressGuard(shadow=True)` raises before any signoff
+  check, so no payload leaves the process. `build_bridge()` returns `None` and
+  `AtlassianBridge.__init__` raises even when the bridge is otherwise fully
+  configured — no HTTP call, no Confluence page, no JSM request.
+* **Evidence:** each `EvidenceRecord` carries `shadow: bool` (hashed and MAC'd).
+  OEKP exports the flag, BENGAL totals `shadow_only`, and BENGAL withholds
+  `trusted_for_execution` for any chain containing shadow records — exactly as
+  it does for rehearsals and unmarked sandbox-origin records.
+
+Shadow mode does **not** relax policy, quorum, target/digest binding or signing.
+The negative guarantees are covered by `tests/test_shadow_mode.py`.
+
+### Live LLM rehearsal (staged rollout)
+
+`python -m agents llm-rehearsal` is the observation-only harness for staging a
+live model before it joins the mesh. It is the bridge between an
+`AGENT_LLM_BASE_URL` connector and the deterministic policy: it sends labeled
+prompts from `fixtures/llm_rehearsal/cases.jsonl`, screens the **untrusted**
+model output with `PolicyEngine.screen_text`, evaluates it as tainted
+(`llm-rehearsal` / `untrusted-model-output` provenance), and records latency,
+tokens, screen hits and HOLD/DENY accuracy — with **zero execution**. It never
+builds a `Mesh`, calls a task handler, runs a tool, consumes an approval or
+writes to an external sink.
+
+* **Zero egress by default.** Without `--live` the harness injects `EchoLLM` and
+  makes no network call; `--live` is the only path to `AGENT_LLM_BASE_URL` and
+  fails closed when no base URL is set. Shadow mode does not block the model
+  HTTP request itself — the harness gates it explicitly.
+* **Rehearsal evidence is never execution proof.** Every record is signed by the
+  same `build_signer(settings)` trust root as the mesh and hard-coded
+  `rehearsal_only=true`, `shadow=true` and `tainted=true`, with provenance that
+  trips `sandbox_origin()`. OEKP exports the flags and BENGAL withholds
+  `trusted_for_execution`. A fresh run id and a per-record nonce live inside the
+  signed payload next to the SHA-256 prompt/response digests, so a prior run
+  cannot be replayed as a new one. Credentials and API keys are never logged;
+  endpoint URLs are redacted.
+* **Expectations cannot assert success.** A `RehearsalCase` may only expect HOLD
+  or DENY — an `ALLOW` expectation is rejected at validation time, because an
+  ALLOW in a rehearsal is never proof that a governed action happened.
+* **Known limitation.** `screen_text` is NFKC + casefold substring matching,
+  not a semantic jailbreak detector; the `jailbreak-instruction` fixture
+  deliberately expects no hit to make this gap explicit.
+
+The negative guarantees are covered by `tests/test_llm_rehearsal.py`.
+
 ### Compliance exports
 
 The canonical store remains an append-only, hash/MAC-chained JSONL file.
@@ -835,6 +919,10 @@ docker compose --env-file .env.docker down
 - [ ] Connector tokens live in environment/secret stores, never in YAML.
 - [ ] `AGENT_ALLOW_WORKSPACE_DELETE` stays unset unless a workflow needs it.
 - [ ] Health port is bound to loopback or a private network, with a token.
+- [ ] For shadow deployments: `AGENT_SHADOW_MODE=true`, a dedicated
+      `<workspace>/shadow` path, bridge disabled, and egress denied end to end;
+      verify every chain record is `shadow: true` and BENGAL reports
+      `trusted_for_execution=false`.
 - [ ] `/data` is a persistent volume; evidence and approvals are backed up.
 - [ ] Redis is private, or TLS is enabled and the URL uses `rediss://`.
 - [ ] Logs are shipped somewhere tamper-resistant; `AGENT_LOG_JSON=true`.
@@ -877,6 +965,17 @@ keys: keep the old public key in the trust bundle while signing with the new
 records drain, then remove the retired key from the bundle. See the rotation
 steps in the sections above.
 
+## Known architectural trade-offs
+
+* **Shadow mode does not replay HITL approvals (Phase 2).** By design,
+  `AGENT_SHADOW_MODE` halts at HOLD → evidence and refuses approval consumption
+  to guarantee zero live-nonce side effects; isolated HITL approval replay is
+  scoped as a Phase 2 enhancement. This is deliberate: proving that shadow mode
+  cannot, under any circumstance, mint or consume a live approval nonce is a
+  stronger security property than simulating a human click. The ALLOW-suppression
+  path (evidence emitted, handler skipped) is covered by the negative tests in
+  `tests/test_shadow_mode.py` rather than by the default CLI demo.
+
 ## Residual risks
 
 * The Redis password appears in the mesh container's environment. Docker secrets
@@ -910,6 +1009,13 @@ steps in the sections above.
   metadata and withholds `trusted_for_execution`, but it does not semantically
   prove that a governed action actually happened. Keep external execution
   audit independent of the evidence chain.
+* Shadow mode suppresses execution, mutating tools and egress in-process; it is
+  not a network-level sandbox. A compromised dependency that bypasses the agent
+  runtime entirely could still make outbound connections. Deploy shadow nodes
+  in a network-segmented zone with no egress route as defence in depth. In
+  particular, shadow mode does not stop `OpenAICompatibleLLM` HTTP calls; the
+  `llm-rehearsal` harness gates model egress behind its explicit `--live` flag,
+  but a live endpoint is still outside the policy decision path.
 * Connector data is untrusted and may be adversarial. Correlation limits the
   blast radius (bounded fields, redaction, no writes), but a compromised source
   can still create false incidents. Treat proposals as recommendations and keep

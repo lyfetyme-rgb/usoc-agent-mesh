@@ -21,8 +21,9 @@ class EgressError(SecurityError):
 
 
 class EgressGuard:
-    def __init__(self, *, block_tainted: bool = False) -> None:
+    def __init__(self, *, block_tainted: bool = False, shadow: bool = False) -> None:
         self.block_tainted = bool(block_tainted)
+        self.shadow = bool(shadow)
 
     @staticmethod
     def is_restricted(*, tainted: bool, classification: Classification | str) -> bool:
@@ -52,6 +53,8 @@ class EgressGuard:
         restricted egress — otherwise an approval for one governed action could
         be replayed against a different external sink.
         """
+        if self.shadow:
+            raise EgressError("shadow mode: external egress is disabled")
         if not self.block_tainted or not self.is_restricted(
             tainted=tainted, classification=classification
         ):

@@ -42,6 +42,7 @@ from agents.trust import (
     build_approval_verifier,
     build_message_authority,
     load_approver_registry,
+    oidc_approval_binding,
     validate_strict_prod,
 )
 
@@ -389,17 +390,139 @@ def test_oidc_approval_verifier_binds_subject_to_registry(tmp_path, monkeypatch)
     token = _jwt(
         key,
         "entra-1",
-        {
-            "iss": settings.approval_oidc_issuer,
-            "aud": settings.approval_oidc_audience,
-            "exp": time.time() + 600,
-            "sub": "alice",
-        },
+        _bound_claims(settings, req, "alice"),
     )
     req.credential = ApprovalCredential(kind="oidc", id_token=token)
     result = verifier("alice", req)
     assert result.verified and result.method == "oidc"
     assert not verifier("bob", req).verified
+
+
+def _bound_claims(settings, req, approver="alice", **extra) -> dict:
+    """Standard OIDC claims plus the per-approval binding in the nonce."""
+    claims = {
+        "iss": settings.approval_oidc_issuer,
+        "aud": settings.approval_oidc_audience,
+        "exp": time.time() + 600,
+        "sub": approver,
+        "nonce": oidc_approval_binding(req, approved=True, approver=approver),
+    }
+    claims.update(extra)
+    return claims
+
+
+def _oidc_verifier(tmp_path, monkeypatch):
+    """Build an OIDC-only verifier backed by a local fake JWKS."""
+    clear_jwks_cache()
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    _fake_jwks(monkeypatch, key, "entra-1")
+    settings = _registry_settings(
+        tmp_path,
+        approval_credential_mode="oidc",
+        approval_oidc_issuer="https://login.example.com/tenant",
+        approval_oidc_audience="usoc-mesh",
+        approval_oidc_jwks_url="https://login.example.com/tenant/keys",
+    )
+    registry = load_approver_registry(settings)
+    verifier = build_approval_verifier(settings, registry)
+    assert isinstance(verifier, ApprovalVerifier)
+    return key, settings, verifier
+
+
+def _approval(**overrides) -> ApprovalRequest:
+    values = dict(
+        action_class=ActionClass.EXECUTE,
+        target="sandbox/node-1",
+        risk=RiskLevel.HIGH,
+        requested_by="seraphim",
+        status=ApprovalStatus.APPROVED,
+        decided_by="alice",
+        nonce="nonce-A",
+        amount="100.00",
+        currency="USD",
+        egress_target="atlassian:https://example.atlassian.net",
+        egress_payload_digest="a" * 64,
+    )
+    values.update(overrides)
+    return ApprovalRequest(**values)
+
+
+def test_oidc_binding_cli_flag_prints_the_exact_digest(tmp_path, monkeypatch, capsys):
+    """Operators can obtain the nonce to put in a human's login request."""
+    req = _approval(id="apr-A")
+
+    class Store:
+        async def get(self, approval_id):
+            return req if approval_id == req.id else None
+
+    monkeypatch.setattr(cli, "_signer", lambda settings: object())
+    monkeypatch.setattr(cli, "_approval_store", lambda settings, signer: Store())
+    args = cli.build_parser().parse_args(
+        ["approval-payload", req.id, "--by", "alice", "--approve", "--oidc-binding"]
+    )
+    assert cli.cmd_approval_payload(args) == 0
+    assert capsys.readouterr().out.strip() == oidc_approval_binding(
+        req, approved=True, approver="alice"
+    )
+
+
+def test_oidc_binding_rejects_token_replayed_for_another_approval(tmp_path, monkeypatch):
+    """A token minted for approval A must not authorize approval B."""
+    key, settings, verifier = _oidc_verifier(tmp_path, monkeypatch)
+    req_a = _approval(id="apr-A")
+    req_b = _approval(id="apr-B", target="prod/wire", amount="999999.00")
+    token = _jwt(key, "entra-1", _bound_claims(settings, req_a))
+
+    # Positive control: the bound token works for the approval it was minted for.
+    req_a.credential = ApprovalCredential(kind="oidc", id_token=token)
+    assert verifier("alice", req_a).verified
+
+    # Negative: same valid, unexpired token, different approval.
+    req_b.credential = ApprovalCredential(kind="oidc", id_token=token)
+    result = verifier("alice", req_b)
+    assert not result.verified
+    assert "not bound to this approval" in result.detail
+
+
+def test_oidc_binding_rejects_changed_amount_and_target(tmp_path, monkeypatch):
+    """The binding commits to the exact decision payload, not just the id."""
+    key, settings, verifier = _oidc_verifier(tmp_path, monkeypatch)
+    original = _approval(id="apr-A")
+    token = _jwt(key, "entra-1", _bound_claims(settings, original))
+
+    for label, changes in (
+        ("amount", {"amount": "999999.00"}),
+        ("target", {"target": "prod/wire"}),
+        ("egress target", {"egress_target": "atlassian:https://evil.example.net"}),
+    ):
+        mutated = original.model_copy(update=changes)
+        mutated.credential = ApprovalCredential(kind="oidc", id_token=token)
+        result = verifier("alice", mutated)
+        assert not result.verified, f"replayed token accepted after {label} change"
+        assert "not bound to this approval" in result.detail
+
+
+def test_oidc_binding_rejects_missing_or_wrong_claim(tmp_path, monkeypatch):
+    """Identity-only tokens and arbitrary nonce values never authorize anything."""
+    key, settings, verifier = _oidc_verifier(tmp_path, monkeypatch)
+    req = _approval(id="apr-A")
+    for nonce in (
+        None,
+        "",
+        "deadbeef",
+        "nön-äscïi",
+        oidc_approval_binding(req, approved=False, approver="alice"),
+    ):
+        claims = _bound_claims(settings, req)
+        if nonce is None:
+            claims.pop("nonce")
+        else:
+            claims["nonce"] = nonce
+        token = _jwt(key, "entra-1", claims)
+        req.credential = ApprovalCredential(kind="oidc", id_token=token)
+        result = verifier("alice", req)
+        assert not result.verified, f"accepted nonce={nonce!r}"
+        assert "not bound to this approval" in result.detail
 
 
 # -- strict doctor ------------------------------------------------------------

@@ -290,6 +290,21 @@ class BaseAgent:
                 await self._publish(msg.reply_with(TaskResult.model_validate(cached)))
                 return
 
+        # Shadow runs still leave a signed, verifiable observation of every input
+        # so operators can compare mesh behaviour with the incumbent process.
+        if self.settings.shadow_mode:
+            await self._audit(
+                "shadow.task",
+                msg,
+                {
+                    "objective": spec.objective,
+                    "action_class": spec.action_class.value,
+                    "target": spec.target,
+                    "shadow": True,
+                },
+                spec,
+            )
+
         # -- governance gate: no consequential action without a policy ALLOW --
         decision: GovernanceDecision | None = None
         try:
@@ -322,6 +337,44 @@ class BaseAgent:
             if decision.decision is DecisionType.DENY:
                 self.metrics.inc("policy.denied")
                 await self._reject(msg, "policy_denied", "; ".join(decision.reasons))
+                return
+            # Shadow mode: keep the real policy outcome, but stop before the
+            # handler. No tool, target or external sink is touched.
+            if self.settings.shadow_mode and decision.allowed:
+                self.metrics.inc("policy.shadow_blocked")
+                shadow_data = decision.model_dump(mode="json")
+                shadow_data.update(
+                    {
+                        "shadow": True,
+                        "would_have": decision.decision.value,
+                        "objective": spec.objective,
+                        "target": spec.target,
+                    }
+                )
+                evidence_ref = await self._audit(
+                    "shadow.decision", msg, shadow_data, spec
+                )
+                await self.bus.ack(self.id, msg)
+                await self._publish(
+                    msg.reply_with(
+                        TaskResult(
+                            ok=True,
+                            output=(
+                                f"shadow: would have executed {spec.action_class.value} "
+                                f"on {spec.target}"
+                            ),
+                            data={
+                                "shadow": True,
+                                "would_have": decision.decision.value,
+                                "action_class": spec.action_class.value,
+                                "target": spec.target,
+                            },
+                            policy_decision_ref=decision.policy_ref,
+                            authorization_ref=decision.authorization_ref,
+                            evidence_ref=evidence_ref,
+                        )
+                    )
+                )
                 return
 
         started = time.perf_counter()
@@ -527,6 +580,7 @@ class BaseAgent:
             provenance=provenance,
             tainted=bool(spec.tainted) if spec is not None else False,
             rehearsal_only=rehearsal,
+            shadow=bool(self.settings.shadow_mode),
             origin=self.id,
             data=data,
         )
@@ -637,6 +691,13 @@ class BaseAgent:
         name = str(call.get("tool_name"))
         if name not in self.spec.tools:
             return {"tool": name, "error": "not permitted for this subsystem"}
+        if self.settings.shadow_mode and name in {
+            "workspace.write",
+            "workspace.delete",
+            "evidence.append",
+        }:
+            self.metrics.inc("tool.shadow_blocked")
+            return {"tool": name, "error": "shadow mode: mutating tools are disabled"}
         self.metrics.inc("tool.called")
         log("tool.call", tool=name)
         try:

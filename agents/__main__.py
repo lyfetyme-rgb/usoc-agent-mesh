@@ -1,10 +1,13 @@
 """CLI: python -m agents {demo,list,profiles,storyboard,export,doctor,integrity,keygen,sign-config,sign-approvers,approval-payload,serve,worker,scale-advice,probe,health,approvals,approve,deny,publish-decision,ingest,demo-fragmentation}
 
     python -m agents demo "Collect edge telemetry, analyse anomalies, record evidence"
+    python -m agents shadow "Collect edge telemetry, evaluate containment"  # observe, never execute
     python -m agents list
     python -m agents profiles                       # 4 Industry Starter Packs and role counts
     python -m agents --profile finops_banking list  # narrow the capability-card role view
     python -m agents storyboard --vertical finance  # 3-minute Money Shot storyboard
+    python -m agents llm-rehearsal                   # offline LLM/policy rehearsal (no egress)
+    python -m agents llm-rehearsal --live            # opt into AGENT_LLM_BASE_URL model egress
     python -m agents export --format oekp_bengal --output exports/
     python -m agents doctor
     python -m agents integrity
@@ -60,6 +63,7 @@ from .trust import (
     CoordinatorKeyring,
     approval_credential_payload,
     build_approval_verifier,
+    oidc_approval_binding,
     build_message_authority,
     load_approver_registry,
     validate_strict_prod,
@@ -86,6 +90,21 @@ def _settings(args: argparse.Namespace) -> Settings:
     if getattr(args, "profile", None):
         overrides["role_profile"] = args.profile
     settings = base.model_copy(update=overrides) if overrides else base
+    if getattr(args, "shadow", False):
+        settings = settings.model_copy(update={"shadow_mode": True})
+    if getattr(settings, "shadow_mode", False):
+        shadow_ws = (
+            settings.workspace
+            if settings.workspace.name == "shadow"
+            else settings.workspace / "shadow"
+        )
+        settings = settings.model_copy(
+            update={
+                "workspace": shadow_ws,
+                "atlassian_bridge_enabled": False,
+                "atlassian_jsm_enabled": False,
+            }
+        )
     return settings_for_profile(settings)
 
 
@@ -231,6 +250,98 @@ def cmd_storyboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_rehearsal_cases(path: Path) -> list:
+    """Load labeled JSONL cases, failing closed on a malformed line."""
+    from .llm_rehearsal import RehearsalCase
+
+    cases: list = []
+    with path.open("r", encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                cases.append(RehearsalCase.model_validate_json(line))
+            except ValueError as exc:
+                raise ValueError(f"{path}:{lineno}: invalid rehearsal case: {exc}") from exc
+    if not cases:
+        raise ValueError(f"no rehearsal cases in {path}")
+    return cases
+
+
+async def _run_llm_rehearsal(args: argparse.Namespace) -> int:
+    """Run labeled prompts through the model and deterministic policy; observe only."""
+    from .evidence import render_export
+    from .governance import InMemoryApprovalStore, PolicyConfig, PolicyEngine
+    from .llm import EchoLLM, build_llm
+    from .llm_rehearsal import run_rehearsal
+
+    # Force the shadow baseline: isolated workspace, bridges off. The harness
+    # itself hard-codes rehearsal_only/shadow on every evidence record and never
+    # calls a tool, handler, approval decision or external sink.
+    args.shadow = True
+    settings = _settings(args)
+    live = bool(getattr(args, "live", False))
+    if live and not settings.llm_base_url:
+        print(
+            "llm-rehearsal: --live requires AGENT_LLM_BASE_URL "
+            "(omit --live for the offline EchoLLM baseline)",
+            file=sys.stderr,
+        )
+        return 2
+
+    cases_path = Path(args.cases)
+    if not cases_path.is_file():
+        print(f"llm-rehearsal: no such cases file: {cases_path}", file=sys.stderr)
+        return 1
+    try:
+        cases = _load_rehearsal_cases(cases_path)
+    except (OSError, ValueError) as exc:
+        print(f"llm-rehearsal: {exc}", file=sys.stderr)
+        return 1
+
+    evidence = EvidenceChain(
+        settings.workspace / "evidence" / "llm-rehearsal.jsonl", signer=_signer(settings)
+    )
+    policy = PolicyEngine(
+        PolicyConfig(
+            allowed_targets=[
+                item.strip() for item in settings.allowed_targets.split(",") if item.strip()
+            ],
+            # Rehearsal never authorizes an egress destination.
+            egress_target=None,
+        ),
+        InMemoryApprovalStore(),
+    )
+    llm = build_llm(settings) if live else EchoLLM()
+    try:
+        report = await run_rehearsal(
+            settings=settings,
+            llm=llm,
+            evidence=evidence,
+            policy=policy,
+            cases=cases,
+            live=live,
+        )
+    finally:
+        await llm.close()
+
+    print(json.dumps(json.loads(report.model_dump_json()), indent=2, sort_keys=True))
+    if getattr(args, "output", None):
+        out = Path(args.output)
+        out.mkdir(parents=True, exist_ok=True)
+        ok, detail = evidence.verify()
+        dest = out / "evidence.oekp-bengal.json"
+        dest.write_text(
+            render_export(
+                evidence.records(), "oekp_bengal", verified=ok, detail=detail
+            ),
+            encoding="utf-8",
+        )
+        print(f"evidence export: {dest}")
+    return 0
+
+
 def _approval_store(settings: Settings, signer=None) -> FileApprovalStore:
     registry = load_approver_registry(settings)
     verifier = build_approval_verifier(settings, registry)
@@ -318,6 +429,11 @@ def _log_verification_failure(settings: Settings, signer, args: argparse.Namespa
 
 def _decide(args: argparse.Namespace, approved: bool) -> int:
     settings = _settings(args)
+    if settings.shadow_mode:
+        print(
+            "shadow mode: approvals are disabled; use 'agents shadow' to observe decisions"
+        )
+        return 1
     signer = _signer(settings)
     store = _approval_store(settings, signer)
 
@@ -371,7 +487,10 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
             from .atlassian_bridge import build_bridge
             from .egress import EgressGuard
 
-            EgressGuard(block_tainted=settings.block_tainted_egress).assert_allowed(
+            EgressGuard(
+                block_tainted=settings.block_tainted_egress,
+                shadow=settings.shadow_mode,
+            ).assert_allowed(
                 target=f"atlassian:{settings.atlassian_base_url or 'adr'}",
                 tainted=req.tainted,
                 classification="restricted" if req.tainted else "internal",
@@ -493,7 +612,10 @@ def cmd_publish_decision(args: argparse.Namespace) -> int:
             if extra is None:
                 raise KeyError(f"no such egress sign-off approval: {signoff_id}")
             signoffs.append(extra)
-        EgressGuard(block_tainted=settings.block_tainted_egress).assert_allowed(
+        EgressGuard(
+            block_tainted=settings.block_tainted_egress,
+            shadow=settings.shadow_mode,
+        ).assert_allowed(
             target=egress_target,
             tainted=req.tainted,
             classification="restricted" if req.tainted else "internal",
@@ -714,6 +836,19 @@ async def _run_demo(args: argparse.Namespace) -> int:
         _print_flow(mesh.trace())
         print(f"\nmetrics: {mesh.metrics.snapshot()['counters']}")
         return 0 if result.ok else 1
+
+
+async def _run_shadow(args: argparse.Namespace) -> int:
+    """Run the mesh against real inputs but never execute or write externally."""
+    args.shadow = True
+    print(
+        "SHADOW MODE: policy/HITL/evidence only; execution, mutating tools and "
+        "external writes are disabled\n"
+    )
+    rc = await _run_demo(args)
+    if rc == 0:
+        print("\nshadow run complete: no action executed, no external write performed")
+    return rc
 
 
 def _print_flow(history: list, limit: int = 80) -> None:
@@ -1095,13 +1230,24 @@ def _add_credential_args(parser: argparse.ArgumentParser) -> None:
 
 
 def cmd_approval_payload(args: argparse.Namespace) -> int:
-    """Print the exact bytes a human must sign for a detached approval."""
+    """Print the exact bytes a human must sign for a detached approval.
+
+    With ``--oidc-binding``, print the digest an id_token must carry in its
+    binding claim (``nonce`` by default) to approve this exact decision.
+    """
     settings = _settings(args)
     store = _approval_store(settings, _signer(settings))
     req = asyncio.run(store.get(args.approval_id))
     if req is None:
         print(f"no such approval: {args.approval_id}")
         return 1
+    if getattr(args, "oidc_binding", False):
+        print(
+            oidc_approval_binding(
+                req, approved=args.approve, approver=args.by
+            )
+        )
+        return 0
     payload = approval_credential_payload(
         req, approved=args.approve, approver=args.by
     )
@@ -1134,6 +1280,12 @@ def build_parser() -> argparse.ArgumentParser:
     demo = sub.add_parser("demo", help="run one goal end to end")
     demo.add_argument("goal", nargs="?", help="goal text (defaults to the USOC edge-telemetry example)")
 
+    shadow = sub.add_parser(
+        "shadow", help="run one goal in shadow mode (observe only; never execute or write)"
+    )
+    shadow.add_argument("goal", nargs="?", help="goal text (defaults to the USOC edge-telemetry example)")
+    shadow.set_defaults(shadow=True)
+
     sub.add_parser("list", help="print the nine capability cards and their roles")
     sub.add_parser("profiles", help="list Industry Starter Profiles and active role counts")
     sub.add_parser("doctor", help="check config, registry, bus, model and security")
@@ -1150,6 +1302,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["cyber", "finance", "healthcare", "all"],
         default="all",
         help="audience vertical (default: all)",
+    )
+    rehearsal = sub.add_parser(
+        "llm-rehearsal",
+        help="run labeled prompts through the model and deterministic policy; observe only",
+    )
+    rehearsal.add_argument(
+        "--cases",
+        default=str(Path("fixtures") / "llm_rehearsal" / "cases.jsonl"),
+        help="JSONL file of labeled rehearsal cases",
+    )
+    rehearsal.add_argument("--output", help="directory for an oekp_bengal evidence export")
+    rehearsal.add_argument(
+        "--live",
+        action="store_true",
+        help="allow AGENT_LLM_BASE_URL model egress (default: offline EchoLLM, no network)",
     )
     integrity = sub.add_parser(
         "integrity", help="print or verify the capability-card manifest hash/signature"
@@ -1189,6 +1356,11 @@ def build_parser() -> argparse.ArgumentParser:
     decision = approval_payload.add_mutually_exclusive_group(required=True)
     decision.add_argument("--approve", action="store_true", help="payload for an approval")
     decision.add_argument("--deny", action="store_true", help="payload for a denial")
+    approval_payload.add_argument(
+        "--oidc-binding",
+        action="store_true",
+        help="print the id_token binding digest instead of the detached-signature payload",
+    )
     serve = sub.add_parser("serve", help="start the mesh, health endpoint and recovery loop")
     serve.add_argument("--host", help="health bind address (default AGENT_HEALTH_HOST)")
     serve.add_argument("--port", type=int, help="health port (default AGENT_HEALTH_PORT)")
@@ -1306,6 +1478,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "demo":
             return asyncio.run(_run_demo(args))
+        if args.command == "shadow":
+            return asyncio.run(_run_shadow(args))
         if args.command == "serve":
             return asyncio.run(_run_serve(args))
         if args.command == "worker":
@@ -1317,6 +1491,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_run_ingest(args))
         if args.command == "demo-fragmentation":
             return asyncio.run(_run_fragmentation_demo(args))
+        if args.command == "llm-rehearsal":
+            return asyncio.run(_run_llm_rehearsal(args))
     except KeyboardInterrupt:
         return 130
     return 2

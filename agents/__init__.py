@@ -3,6 +3,7 @@
 from .atlassian_bridge import AtlassianBridge, PublicationEnvelope, build_bridge
 from .asymmetric import (
     Ed25519KMSSigner,
+    Ed25519RawSigner,
     Ed25519Signer,
     Ed25519Verifier,
     PublicKeySet,
@@ -63,6 +64,7 @@ from .governance import (
     PolicyEngine,
 )
 from .llm import EchoLLM, LLM, OpenAICompatibleLLM, build_llm
+from .llm_rehearsal import CaseResult, RehearsalCase, RehearsalReport, run_rehearsal
 from .mesh import Mesh, validate_agent_tiers
 from .orchestrator import LLMPlanner, Orchestrator, PlanError, RouterPlanner, validate_plan
 from .registry import Registry, RegistryError, SubsystemSpec, load_registry
@@ -105,6 +107,7 @@ __all__ = [
     "BaseAgent",
     "BengalAgent",
     "Bus",
+    "CaseResult",
     "Classification",
     "Connector",
     "ConnectorBatch",
@@ -116,6 +119,7 @@ __all__ = [
     "DecisionType",
     "EchoLLM",
     "Ed25519KMSSigner",
+    "Ed25519RawSigner",
     "Ed25519Signer",
     "Ed25519Verifier",
     "PublicKeySet",
@@ -154,6 +158,8 @@ __all__ = [
     "RedisStore",
     "Registry",
     "RegistryError",
+    "RehearsalCase",
+    "RehearsalReport",
     "RetryableError",
     "RiskLevel",
     "RouterPlanner",
@@ -187,6 +193,7 @@ __all__ = [
     "load_connectors",
     "load_registry",
     "redact_url",
+    "run_rehearsal",
     "scoped_tool_registry",
     "validate_agent_tiers",
     "validate_plan",

@@ -39,13 +39,14 @@ python -m agents list            # nine cards and all 93 roles
 python -m agents profiles        # the four Industry Starter Packs and role counts
 python -m agents storyboard --vertical finance   # 3-minute Money Shot storyboard
 python -m agents export --format oekp_bengal --output exports/  # compliance export
+python -m agents shadow          # observe-only: policy/HITL/evidence, NO execution or writes
 python -m agents demo            # one governed goal end to end
 python -m agents health          # SHELL health + diagnostics
 python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --vertical finance      # transaction gate + dual HITL
 python -m agents demo-fragmentation --vertical healthcare   # PII/PHI taint + signed egress
-python -m pytest -q              # 279 passed, 1 env-gated skip, no network
+python -m pytest -q              # 311 passed, 1 env-gated skip, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
@@ -72,7 +73,7 @@ the bridge is opt-in and its tests use an injected HTTP transport.
 
 | Time | Show | Point |
 |---|---|---|
-| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 279 passing with 1 symlink skip. |
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 311 passing with 1 symlink skip. |
 | 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
 | 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
 | 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |
@@ -293,6 +294,7 @@ override its DENY.
 | approval is approved and covers the action, target and mission | **ALLOW** + scoped authorization ref (TTL 900 s) |
 | CYBER DEFENSE task matching prohibited offensive intent | **DENY** before the model runs |
 | tainted/restricted data egress without a verified sign-off bound to the exact destination and payload digest | **DENY** (Clinical pack) — no external publication |
+| `AGENT_SHADOW_MODE=true` and the policy would ALLOW | **OBSERVE** — the real ALLOW is recorded as `shadow.decision`, but the handler is never called; no tool, target or sink is touched |
 
 Runtime behaviour is consistent: `HOLD` returns a typed `Handoff`, `DENY` returns
 a typed `Failure`, `ALLOW` attaches `policy_decision_ref`, `authorization_ref`
@@ -551,6 +553,44 @@ With a real endpoint the orchestrator can use `LLMPlanner`, which plans a DAG
 against the same capability cards. Without one it uses the deterministic
 `RouterPlanner`.
 
+### Live LLM rehearsal (staged rollout)
+
+Before pointing the mesh at a live model, rehearse it. The harness sends
+labeled prompts to the model, screens the *untrusted* output with the real
+deterministic policy, and measures latency, tokens, prompt-injection hits and
+HOLD/DENY accuracy — without executing anything:
+
+```powershell
+python -m agents llm-rehearsal                    # offline EchoLLM, zero network
+python -m agents llm-rehearsal --live             # opt into AGENT_LLM_BASE_URL model egress
+python -m agents llm-rehearsal --output exports/ # also write an oekp_bengal evidence export
+```
+
+The default path uses `EchoLLM` and makes no network call; `--live` is the only
+way to reach `AGENT_LLM_BASE_URL`, and it fails closed if no base URL is set.
+Rehearsal has **no tools, handlers, bus traffic, approval decisions, approval
+consumption, egress guard calls or external writes** — it never constructs a
+`Mesh` or calls a task handler. Cases live in
+`fixtures/llm_rehearsal/cases.jsonl` (one labeled JSON object per line; pass
+`--cases` to use your own).
+
+Every observation is appended to a hash-chained evidence file
+(`evidence/llm-rehearsal.jsonl` in the isolated shadow workspace) signed by the
+same `build_signer(settings)` trust root as the mesh — HMAC or Ed25519 per
+`AGENT_SIGNING_MODE`. Each record is hard-coded `rehearsal_only=true`,
+`shadow=true` and `tainted=true`, with `llm-rehearsal` /
+`untrusted-model-output` provenance, so BENGAL withholds
+`trusted_for_execution`. A fresh run id and a per-record nonce sit inside the
+signed payload, alongside the SHA-256 prompt/response digests, so a prior run
+cannot be replayed as a new one. API keys and endpoint credentials are never
+logged; URLs are redacted.
+
+The policy screen (`PolicyEngine.screen_text`) is NFKC + casefold substring
+matching against a defensive-only pattern list — it is a speed bump, not a
+jailbreak detector. The `jailbreak-instruction` fixture deliberately expects no
+screen hit to document this known limitation; regex/semantic detection is out
+of scope here.
+
 Governance-relevant environment settings:
 
 ```powershell
@@ -595,6 +635,7 @@ just a laptop. The full threat model and deployment checklist are in
 | approval quorum | dual-approver HITL requires distinct verified humans; a partial quorum stays `PENDING`, cannot spend the nonce or be cached as an ALLOW, and the execution gate re-checks every decision |
 | PII/PHI taint | every connector can classify health/personal data, raising it to `RESTRICTED` with monotone taint that survives correlation, approval and evidence |
 | signed egress guard | tainted/restricted data cannot be published externally without a verified detached/OIDC sign-off bound to the exact destination and payload digest (Clinical pack) |
+| shadow mode | `AGENT_SHADOW_MODE=true` runs real inputs through policy/HITL/evidence but never executes, never writes and never egresses; isolated workspace/approvals, distinct `shadow` evidence, BENGAL withholds `trusted_for_execution` |
 
 ```powershell
 # Generate the cluster secret and health token.
@@ -659,17 +700,58 @@ pass an Okta/Entra `id_token` whose `sub` matches the registry id:
 ```powershell
 python -m agents approval-payload apr-89d9db2cba --by alice --approve
 python -m agents approve apr-89d9db2cba --by alice --signature-file /run/secrets/alice.sig
-# OIDC alternative:
+# OIDC alternative: get the per-approval nonce, put it in the login request,
+# then submit the token the provider returns:
+python -m agents approval-payload apr-89d9db2cba --by alice --approve --oidc-binding
 python -m agents approve apr-89d9db2cba --by alice --id-token-file /run/secrets/alice.idtoken
 ```
 
 HITL verifies the credential against the signed registry (or the configured
 JWKS) and writes an `approval.verification` record to OEKP; failed attempts are
-recorded with `verified: false`. Configure OIDC with
+recorded with `verified: false`. An OIDC token must carry the per-approval
+binding digest in its `nonce` claim (override the claim name with
+`AGENT_APPROVAL_OIDC_BINDING_CLAIM`); a token for a different approval, target,
+amount or decision is rejected. Configure OIDC with
 `AGENT_APPROVAL_OIDC_ISSUER`, `AGENT_APPROVAL_OIDC_AUDIENCE`,
 `AGENT_APPROVAL_OIDC_JWKS_URL` and optionally `AGENT_APPROVAL_OIDC_ROLE_CLAIM`.
 See [SECURITY.md](SECURITY.md#production-trust-mode-agent_strict_prod) for the
 full trust-bundle format, key custody, rotation and checklist.
+
+### Shadow mode (observe-only deployment)
+
+Shadow mode lets the mesh sit beside a live USOC process and consume the **same
+real inputs**, running the full policy/HITL/evidence path for comparison —
+without being able to change anything. Turn it on with `AGENT_SHADOW_MODE=true`
+or use the dedicated command:
+
+```powershell
+python -m agents --workspace ./shadow-workspace shadow "Collect edge telemetry and evaluate a containment action"
+```
+
+Guarantees, enforced in code (not by convention):
+
+* **No execution.** A policy `ALLOW` still produces its decision and evidence,
+  but the agent handler is never called. The result carries
+  `data.shadow=true` and `data.would_have=ALLOW`.
+* **No external writes.** The Atlassian bridge is refused and `EgressGuard`
+  denies every egress attempt unconditionally — even a perfectly signed,
+  digest-bound sign-off cannot open the gate in shadow.
+* **No state bleed.** The workspace is isolated under `<workspace>/shadow`, so
+  shadow approvals and evidence can never be confused with — or spend — live
+  approvals. Held actions still create real approval requests in that isolated
+  store; `agents approve` is refused against a shadow workspace.
+* **Mutating tools fail closed.** `workspace.write`, `workspace.delete` and
+  `evidence.append` stay registered (registry validation requires it) but their
+  handlers refuse every call. Read-only tools and read-only steps still work.
+* **Distinct evidence.** Every record is marked `shadow: true` (covered by the
+  hash/MAC). OEKP exports the flag; BENGAL reports `shadow_only` and withholds
+  `trusted_for_execution`, so a shadow run can never be presented as proof of a
+  real action.
+
+The policy engine, approval rules, egress bindings and evidence signing are
+unchanged — shadow only adds denials and a marker. Verify a run by checking that
+`<workspace>/shadow/evidence/chain.jsonl` verifies and every record has
+`"shadow": true`.
 
 ## Why this holds up
 
