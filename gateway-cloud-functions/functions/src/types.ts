@@ -53,8 +53,6 @@ export type AlertDoc = {
   notifiedAt?: Timestamp;
   deepLink?: string;
   subject?: string;
-  /** Correlates the alert with the ingress request that raised it. */
-  requestId?: string;
 };
 
 export type RollupDoc = {
@@ -83,6 +81,4 @@ export type PacketDoc = {
   expireAt: Timestamp;
   breachCount: number;
   breaches: BreachInfo[];
-  /** Accepted client trace id, or a generated one when the gateway omitted it. */
-  requestId?: string;
 };

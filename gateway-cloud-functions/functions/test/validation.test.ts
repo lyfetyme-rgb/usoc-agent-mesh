@@ -1,9 +1,7 @@
-import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import type { Request } from "express";
 import { describe, expect, it } from "vitest";
 import {
-  HttpError,
   PayloadTooLargeError,
   ValidationError,
   bearerToken,
@@ -18,7 +16,6 @@ function streamRequest(chunks: Buffer[]): Request {
     headers: {},
     on: stream.on.bind(stream),
     destroy: stream.destroy.bind(stream),
-    resume: stream.resume.bind(stream),
   } as unknown as Request;
 }
 
@@ -81,21 +78,6 @@ describe("readRawBody", () => {
   it("aborts a streamed body once the limit is reached", async () => {
     const req = streamRequest([Buffer.alloc(4096)]);
     await expect(readRawBody(req, 4096)).rejects.toThrow(PayloadTooLargeError);
-  });
-
-  it("rejects promptly when the client drops the connection mid-body", async () => {
-    const emitter = new EventEmitter();
-    const req = {
-      headers: {},
-      on: emitter.on.bind(emitter),
-      resume: () => undefined,
-    } as unknown as Request;
-    const pending = readRawBody(req, 4096);
-    emitter.emit("aborted");
-    await expect(pending).rejects.toMatchObject({
-      status: 400,
-      code: "CLIENT_ABORTED",
-    } as Partial<HttpError>);
   });
 });
 

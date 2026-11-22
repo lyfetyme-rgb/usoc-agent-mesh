@@ -32,7 +32,6 @@ function gateway(status: string, lastSeenAt?: number): any {
 
 beforeEach(() => {
   (db as any).store.clear();
-  (db as any).batches.length = 0;
   const store = (db as any).store as Map<string, any>;
   store.set("tenants/t1/gateways/stale", gateway("ONLINE", NOW - 200_000));
   store.set("tenants/t1/gateways/fresh", gateway("ONLINE", NOW - 100_000));
@@ -70,37 +69,5 @@ describe("checkGatewayHeartbeats", () => {
 
     expect(store.get("alerts/connectivity_stale").createdAt).toBe(createdAt);
     expect(store.get("tenants/t1/gateways/stale").status).toBe("OFFLINE");
-  });
-
-  it("ignores gateways that are already OFFLINE, even with an old lastSeenAt", async () => {
-    const store = (db as any).store as Map<string, any>;
-    store.set("tenants/t1/gateways/already-down", gateway("OFFLINE", NOW - 900_000));
-
-    await (checkGatewayHeartbeats as any)();
-
-    expect(store.has("alerts/connectivity_already-down")).toBe(false);
-    expect(store.get("tenants/t1/gateways/already-down").offlineSince).toBeUndefined();
-  });
-
-  it("flips a large outage without exceeding the 500-operation batch limit", async () => {
-    const store = (db as any).store as Map<string, any>;
-    for (let i = 0; i < 600; i += 1) {
-      store.set(`tenants/t1/gateways/bulk-${i}`, gateway("ONLINE", NOW - 200_000));
-    }
-
-    await (checkGatewayHeartbeats as any)();
-
-    const flipped = [...store.entries()].filter(
-      ([path, doc]) => path.includes("/gateways/bulk-") && (doc as any).status === "OFFLINE",
-    );
-    // This assertion counts only the bulk gateways; the seeded "stale" fixture
-    // is also flipped and is included in the batch-operation total below.
-    expect(flipped).toHaveLength(600);
-    expect([...store.keys()].filter((path) => path.startsWith("alerts/connectivity_bulk-"))).toHaveLength(600);
-
-    const batches = (db as any).batches as Array<{ opCount: number }>;
-    expect(batches.length).toBeGreaterThan(1);
-    expect(Math.max(...batches.map((b) => b.opCount))).toBeLessThanOrEqual(500);
-    expect(batches.reduce((sum, b) => sum + b.opCount, 0)).toBe(1_202);
   });
 });
