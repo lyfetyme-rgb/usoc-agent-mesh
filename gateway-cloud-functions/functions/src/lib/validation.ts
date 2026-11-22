@@ -59,8 +59,11 @@ export async function readRawBody(
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += buffer.byteLength;
       if (size >= maxBytes) {
+        // Keep the socket alive so the 413 can actually be delivered; draining
+        // discards the remainder without leaving the client waiting forever.
         fail(new PayloadTooLargeError(maxBytes));
-        req.destroy();
+        chunks.length = 0;
+        req.resume();
         return;
       }
       chunks.push(buffer);
@@ -69,6 +72,16 @@ export async function readRawBody(
       if (!settled) {
         settled = true;
         resolve(Buffer.concat(chunks));
+      }
+    });
+    // A client that disconnects mid-body must not leave this promise pending
+    // until the platform timeout kills the function.
+    req.on("aborted", () =>
+      fail(new HttpError(400, "CLIENT_ABORTED", "Request body was not fully received")),
+    );
+    req.on("close", () => {
+      if (!settled) {
+        fail(new HttpError(400, "CLIENT_ABORTED", "Request body was not fully received"));
       }
     });
     req.on("error", fail);

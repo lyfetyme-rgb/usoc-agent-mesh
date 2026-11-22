@@ -59,7 +59,7 @@ class JsonFormatter(logging.Formatter):
         for key, value in getattr(record, "fields", {}).items():
             entry[key] = value
         if record.exc_info:
-            entry["error"] = self.formatException(record.exc_info)
+            entry["error"] = redact_text(self.formatException(record.exc_info))
         return json.dumps(entry, default=str, separators=(",", ":"))
 
 
@@ -69,6 +69,8 @@ class TextFormatter(logging.Formatter):
         fields = getattr(record, "fields", None)
         if fields:
             base += " " + " ".join(f"{k}={v}" for k, v in fields.items())
+        if record.exc_info:
+            base += " error=" + redact_text(self.formatException(record.exc_info))
         return base
 
 
@@ -91,24 +93,46 @@ def configure_logging(level: str = "INFO", json_logs: bool = False) -> None:
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(JsonFormatter() if json_logs else TextFormatter())
     root = logging.getLogger()
-    root.handlers.clear()
+    # Keep handlers installed by the host (e.g. a platform log shipper); only
+    # replace one of our own so repeated configure calls do not duplicate lines.
+    for existing in list(root.handlers):
+        if getattr(existing, "_usoc_handler", False):
+            root.removeHandler(existing)
+    handler._usoc_handler = True  # type: ignore[attr-defined]
     root.addHandler(handler)
     root.setLevel(level.upper())
     logging.getLogger("httpx").setLevel("WARNING")
 
 
+LATENCY_BUCKETS_MS = (50, 100, 250, 500, 1_000, 2_500, 5_000)
+
+
 class Metrics:
-    """Process-local counters. Swap for Prometheus/OTel in production."""
+    """Process-local counters and latency histograms.
+
+    Snapshots are emitted as structured log lines so an external collector can
+    aggregate them without changing the mesh's dependencies.
+    """
 
     def __init__(self) -> None:
         self.counters: Counter[str] = Counter()
+        self.latencies: dict[str, Counter[str]] = {}
         self._started = time.monotonic()
 
     def inc(self, name: str, n: int = 1) -> None:
         self.counters[name] += n
 
+    def observe(self, name: str, duration_ms: float) -> None:
+        bucket = self.latencies.setdefault(name, Counter())
+        self.inc(f"{name}.count")
+        self.inc(f"{name}.sum_ms", max(0, round(duration_ms)))
+        for bound in LATENCY_BUCKETS_MS:
+            if duration_ms <= bound:
+                self.inc(f"{name}.le_{bound}")
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "uptime_s": round(time.monotonic() - self._started, 1),
             "counters": dict(sorted(self.counters.items())),
+            "latency_buckets_ms": list(LATENCY_BUCKETS_MS),
         }

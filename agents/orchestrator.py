@@ -352,6 +352,7 @@ class Orchestrator:
         total_tokens = sum(r.tokens_used for r in results.values())
         elapsed = int((time.perf_counter() - started) * 1000)
         self.metrics.inc("goal.completed")
+        self.metrics.observe("goal.duration_ms", elapsed)
         log("goal.done", steps=len(results), tokens=total_tokens, ms=elapsed)
         await self.bus.publish(
             Message.event(
@@ -493,6 +494,7 @@ class Orchestrator:
         reason: str,
     ) -> GoalResult:
         self.metrics.inc("goal.failed")
+        self.metrics.observe("goal.duration_ms", int((time.perf_counter() - started) * 1000))
         log("goal.failed", reason=reason)
         owners = {step.id: step.agent for step in plan.steps}
         kinds = {

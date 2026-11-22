@@ -7,12 +7,17 @@ vi.mock("firebase-functions/v2/firestore", () => ({
 const NOW = 1_700_000_000_000;
 
 vi.mock("../src/lib/firestore", async () => {
-  const { fakeTimestamp } = await import("./helpers/fakeFirestore");
-  return { now: () => fakeTimestamp(NOW) };
+  const { FakeFirestore, fakeTimestamp } = await import("./helpers/fakeFirestore");
+  return {
+    db: new FakeFirestore(),
+    now: () => fakeTimestamp(NOW),
+    FieldValue: { delete: () => ({ __fakeDelete: true }) },
+  };
 });
 
 vi.mock("../src/lib/notification", () => ({ sendAlertSms: vi.fn().mockResolvedValue(true) }));
 
+import { db } from "../src/lib/firestore";
 import { sendAlertSms } from "../src/lib/notification";
 import {
   dispatchAlertNotification,
@@ -20,23 +25,29 @@ import {
 } from "../src/functions/dispatchAlertNotification";
 
 function event(data: any, alertId: string): any {
-  const update = vi.fn().mockResolvedValue({});
+  const path = `alerts/${alertId}`;
+  (db as any).store.set(path, data);
   return {
-    data: { data: () => data, ref: { update } },
+    data: { data: () => data, ref: (db as any).doc(path) },
     params: { alertId, requestId: alertId },
-    update,
   };
 }
 
 beforeEach(() => {
+  (db as any).store.clear();
   vi.mocked(sendAlertSms).mockClear();
   vi.mocked(sendAlertSms).mockResolvedValue(true);
 });
 
 describe("dispatchAlertNotification", () => {
-  it("texts on-duty for a new alert and records notifiedAt", async () => {
+  it("claims the alert before sending and records notifiedAt", async () => {
     const evt = event(
-      { tenantId: "t1", kind: "CRITICAL_LIMIT", message: "Gateway gw1: temp=90 above max 80" },
+      {
+        tenantId: "t1",
+        kind: "CRITICAL_LIMIT",
+        status: "OPEN",
+        message: "Gateway gw1: temp=90 above max 80",
+      },
       "breach_gw1_temp",
     );
 
@@ -48,21 +59,37 @@ describe("dispatchAlertNotification", () => {
       kind: "CRITICAL_LIMIT",
       message: "Gateway gw1: temp=90 above max 80",
     });
-    expect(evt.update).toHaveBeenCalledTimes(1);
-    expect(evt.update.mock.calls[0][0].notifiedAt.toMillis()).toBe(NOW);
+    expect((db as any).store.get("alerts/breach_gw1_temp").notifiedAt.toMillis()).toBe(NOW);
   });
 
-  it("does not resend an already-notified alert", async () => {
-    const evt = event({ tenantId: "t1", kind: "CONNECTIVITY", notifiedAt: {}, message: "offline" }, "a1");
-    await (dispatchAlertNotification as any)(evt);
+  it("does not resend an already-notified or non-OPEN alert", async () => {
+    await (dispatchAlertNotification as any)(
+      event({ tenantId: "t1", status: "OPEN", notifiedAt: {}, message: "offline" }, "a1"),
+    );
+    await (dispatchAlertNotification as any)(
+      event({ tenantId: "t1", status: "RESOLVED", message: "offline" }, "a2"),
+    );
     expect(sendAlertSms).not.toHaveBeenCalled();
   });
 
   it("does not mark notified when no SMS could be sent", async () => {
     vi.mocked(sendAlertSms).mockResolvedValue(false);
-    const evt = event({ tenantId: "t1", kind: "CONNECTIVITY", message: "offline" }, "a1");
+    const evt = event({ tenantId: "t1", status: "OPEN", message: "offline" }, "a1");
     await (dispatchAlertNotification as any)(evt);
-    expect(evt.update).not.toHaveBeenCalled();
+    expect((db as any).store.get("alerts/a1").notifiedAt).toBeUndefined();
+  });
+
+  it("releases the claim and rethrows when Twilio fails, so the trigger can retry", async () => {
+    vi.mocked(sendAlertSms).mockRejectedValueOnce(new Error("Twilio 503"));
+    const evt = event({ tenantId: "t1", status: "OPEN", message: "offline" }, "a1");
+
+    await expect((dispatchAlertNotification as any)(evt)).rejects.toThrow("Twilio 503");
+    expect((db as any).store.get("alerts/a1").notifiedAt).toBeUndefined();
+
+    vi.mocked(sendAlertSms).mockResolvedValueOnce(true);
+    await (dispatchAlertNotification as any)(evt);
+    expect(sendAlertSms).toHaveBeenCalledTimes(2);
+    expect((db as any).store.get("alerts/a1").notifiedAt.toMillis()).toBe(NOW);
   });
 });
 
@@ -77,7 +104,7 @@ describe("dispatchCustomerRequestNotification", () => {
       kind: "CUSTOMER_REQUEST",
       message: "New Customer Request Form received: Leaking valve",
     });
-    expect(evt.update).toHaveBeenCalled();
+    expect((db as any).store.get("alerts/req-1").notifiedAt.toMillis()).toBe(NOW);
   });
 
   it("ignores requests without a tenant", async () => {

@@ -147,6 +147,30 @@ def test_jsonl_connector_reports_bad_lines_without_stopping(tmp_path: Path) -> N
     assert len(batch.errors) == 2
 
 
+def test_jsonl_connector_keeps_good_records_when_one_exceeds_schema_limits(tmp_path: Path) -> None:
+    """A Pydantic ValidationError on one record must not drop the whole batch."""
+    path = tmp_path / "obs.jsonl"
+    too_many_tags = json.dumps(
+        {"id": "2", "entity": "edge-bad", "severity": "high", "title": "many tags", "tags": [f"t{i}" for i in range(21)]}
+    )
+    path.write_text(
+        '{"id": "1", "entity": "edge-ok", "severity": "low", "title": "fine"}\n'
+        + too_many_tags
+        + "\n"
+        '{"id": "3", "entity": "edge-ok2", "severity": "low", "title": "fine"}\n',
+        encoding="utf-8",
+    )
+    connector = JsonlConnector(
+        name="obs",
+        source_type=SourceType.OBSERVABILITY,
+        path="obs.jsonl",
+        root=tmp_path,
+    )
+    batch = asyncio.run(connector.fetch())
+    assert [s.entity for s in batch.signals] == ["edge-ok", "edge-ok2"]
+    assert len(batch.errors) == 1
+
+
 def test_http_connector_refuses_plain_http_off_loopback() -> None:
     with pytest.raises(ConnectorConfigError):
         HttpJsonConnector(

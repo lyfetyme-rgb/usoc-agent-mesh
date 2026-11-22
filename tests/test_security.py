@@ -393,6 +393,14 @@ def test_redaction_removes_bearer_tokens_and_url_credentials():
     )
 
 
+def test_redaction_removes_direct_pii_values_in_free_text():
+    text = "notify jane.doe@example.com or +1 555 123 4567 about bearer abc.def-123"
+    redacted = redact_text(text)
+    assert "jane.doe@example.com" not in redacted
+    assert "555 123 4567" not in redacted
+    assert "abc.def-123" not in redacted
+
+
 def test_redaction_masks_sensitive_fields():
     out = redact_fields(
         {

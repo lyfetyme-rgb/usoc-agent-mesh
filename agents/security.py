@@ -230,7 +230,12 @@ def redact_text(value: str) -> str:
     value = URL_CREDENTIALS.sub(
         lambda m: f"{m.group('scheme')}{m.group('user')}:***@", value
     )
-    return QUERY_SECRET.sub(r"\1***", value)
+    value = QUERY_SECRET.sub(r"\1***", value)
+    # Exception text and logs can carry direct identifiers even when no
+    # sensitive field name is present (Twilio errors, IdP errors, user goals).
+    for pattern in (_PII_VALUE["email"], _PII_VALUE["phone"]):
+        value = pattern.sub("***", value)
+    return value
 
 
 def redact_url(url: str) -> str:
