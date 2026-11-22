@@ -13,7 +13,7 @@
     <div class="header-right"><div class="clock"><strong id="clock">--:--:--</strong><small id="date">--</small></div><button id="theme" type="button" aria-label="Toggle color theme">◐ LIGHT</button></div>
   </header>
   <main>
-    <div class="page-heading"><div><p class="eyebrow">OPERATIONS OVERVIEW <span> / </span> LIVE STATUS</p><h1>Mission control<span>.</span></h1><p class="subtitle">A unified view of your systems, signals, and governance.</p></div><div class="sync"><span class="dot" id="sync-dot"></span><span id="sync">CONNECTING</span><small id="updated">Awaiting first update</small></div></div>
+    <div class="page-heading"><div><p class="eyebrow">OPERATIONS OVERVIEW <span> / </span> LIVE STATUS</p><h1>Mission control<span>.</span></h1><p class="subtitle">A unified view of your systems, signals, and governance.</p></div><div class="sync" aria-live="polite" aria-atomic="true" role="status"><span class="dot" id="sync-dot" aria-hidden="true"></span><span id="sync">CONNECTING</span><small id="updated" aria-live="polite">Awaiting first update</small></div></div>
     <section class="statusbar" aria-label="Platform status">
       <div><span>PLATFORM</span><strong id="platform">CHECKING</strong></div>
       <div><span>MESSAGE BUS</span><strong id="bus">—</strong></div>

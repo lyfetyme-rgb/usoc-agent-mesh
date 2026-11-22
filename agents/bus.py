@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Any, Protocol, runtime_checkable
@@ -36,6 +36,13 @@ STREAM_PREFIX = "mesh:"
 CONTROL_PLANE_AGENTS = frozenset({"orchestrator"})
 AUDIT_SINK_AGENTS = frozenset({"oekp"})
 WILDCARD_CHARS = ("*", "?", "[")
+
+
+def _append_bounded(items: list[Message], msg: Message, limit: int) -> None:
+    """Keep the in-process mirror bounded without changing its list contract."""
+    items.append(msg)
+    if limit > 0 and len(items) > limit:
+        del items[: len(items) - limit]
 
 # Control-plane broadcasts that must never be forged by a sibling worker.
 POLICY_VERDICT_TOPIC = "policy.verdict"
@@ -242,7 +249,11 @@ class InMemoryBus:
         insecure_dev_mode: bool = False,
         sender_verifier: Any = None,
         topic_rules: dict[str, TopicRule] | None = None,
+        history_limit: int = 10_000,
+        dlq_limit: int = 1_000,
     ) -> None:
+        self._history_limit = history_limit
+        self._dlq_limit = dlq_limit
         self._queues: dict[str, asyncio.Queue[Message]] = {}
         self._patterns: dict[str, list[str]] = defaultdict(list)
         self._max_queue = max_queue
@@ -289,6 +300,8 @@ class InMemoryBus:
             log("bus.sender_rejected", sender=msg.sender, topic=msg.topic)
             raise PermissionError(f"sender {msg.sender} failed identity verification")
         if has_wildcard(msg.topic):
+            self.stats["acl_denied"] += 1
+            log("bus.wildcard_rejected", sender=msg.sender, topic=msg.topic)
             raise PermissionError("publish topic must be concrete, not a wildcard pattern")
         if self.publish_acl is None:
             if not self.insecure_dev_mode:
@@ -309,7 +322,7 @@ class InMemoryBus:
             self.stats["acl_denied"] += 1
             log("bus.acl_denied", sender=msg.sender, topic=msg.topic, reason=denial)
             raise PermissionError(denial)
-        self.history.append(msg)
+        _append_bounded(self.history, msg, self._history_limit)
         self.stats["published"] += 1
         targets = self._subscribers(msg.topic)
         if not targets:
@@ -322,7 +335,7 @@ class InMemoryBus:
             except asyncio.QueueFull:
                 # Backpressure: dropping is worse than blocking the publisher,
                 # but a stuck agent must not stall the mesh. Dead-letter it.
-                self.dlq.append(msg)
+                _append_bounded(self.dlq, msg, self._dlq_limit)
                 self.stats["overflow"] += 1
                 log("bus.overflow", agent=agent, topic=msg.topic)
 
@@ -352,7 +365,7 @@ class InMemoryBus:
                 if denial is None:
                     return msg
                 self.stats["rejected"] += 1
-                self.dlq.append(msg)
+                _append_bounded(self.dlq, msg, self._dlq_limit)
                 log("bus.rejected", agent=agent, reason=denial, sender=msg.sender, topic=msg.topic)
                 if timeout <= 0:
                     return None
@@ -364,7 +377,7 @@ class InMemoryBus:
                     return msg
                 detail = denial
             self.stats["rejected"] += 1
-            self.dlq.append(msg)
+            _append_bounded(self.dlq, msg, self._dlq_limit)
             log("bus.rejected", agent=agent, reason=detail, sender=msg.sender, topic=msg.topic)
             if timeout <= 0:
                 return None
@@ -380,7 +393,7 @@ class InMemoryBus:
         if requeue:
             await self.publish(_bump(msg))
         else:
-            self.dlq.append(msg)
+            _append_bounded(self.dlq, msg, self._dlq_limit)
             self.stats["dead_lettered"] += 1
             log("bus.dead_letter", agent=agent, message=msg.summary())
 
@@ -414,6 +427,7 @@ class RedisBus:
         insecure_dev_mode: bool = False,
         sender_verifier: Any = None,
         topic_rules: dict[str, TopicRule] | None = None,
+        history_limit: int = 10_000,
     ) -> None:
         import redis.asyncio as aioredis
 
@@ -430,6 +444,7 @@ class RedisBus:
         self._streams: dict[str, list[str]] = defaultdict(list)
         self._inflight: dict[str, str] = {}
         self._maxlen = maxlen
+        self._history_limit = history_limit
         self.signer = signer
         self.publish_acl = publish_acl
         self.subscribe_acl = subscribe_acl
@@ -489,6 +504,8 @@ class RedisBus:
             log("bus.sender_rejected", sender=msg.sender, topic=msg.topic)
             raise PermissionError(f"sender {msg.sender} failed identity verification")
         if has_wildcard(msg.topic):
+            self.stats["acl_denied"] += 1
+            log("bus.wildcard_rejected", sender=msg.sender, topic=msg.topic)
             raise PermissionError("publish topic must be concrete, not a wildcard pattern")
         if self.publish_acl is None:
             if not self.insecure_dev_mode:
@@ -508,7 +525,7 @@ class RedisBus:
             self.stats["acl_denied"] += 1
             log("bus.acl_denied", sender=msg.sender, topic=msg.topic, reason=denial)
             raise PermissionError(denial)
-        self._history.append(msg)
+        _append_bounded(self._history, msg, self._history_limit)
         self.stats["published"] += 1
         await self._redis.xadd(
             self._stream(msg.topic),

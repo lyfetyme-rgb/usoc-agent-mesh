@@ -33,7 +33,14 @@ class InMemoryStore:
         return value
 
     async def set(self, key: str, value: Any, ttl_s: float | None = None) -> None:
-        self._data[key] = (value, None if ttl_s is None else time.monotonic() + ttl_s)
+        # Expired keys are otherwise never revisited when a task is unique:
+        # get() is only called on a redelivery. Sweep opportunistically here so
+        # a long-running process does not accumulate one entry per executed task.
+        now = time.monotonic()
+        expired = [k for k, (_, expires) in self._data.items() if expires is not None and now > expires]
+        for k in expired:
+            self._data.pop(k, None)
+        self._data[key] = (value, None if ttl_s is None else now + ttl_s)
 
     async def close(self) -> None:
         self._data.clear()

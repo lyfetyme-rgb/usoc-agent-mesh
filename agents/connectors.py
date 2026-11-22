@@ -31,6 +31,7 @@ import ipaddress
 import json
 import os
 import re
+import time
 from abc import ABC, abstractmethod
 from collections import Counter
 from datetime import datetime, timezone
@@ -47,6 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .config import Settings
 from .contracts import Classification
+from .observability import error_fingerprint, log
 from .security import detect_sensitive_data, redact_fields
 
 MAX_ATTRIBUTES_BYTES = 16 * 1024
@@ -881,22 +883,48 @@ async def ingest_connectors(
     """Poll connectors concurrently. One failure is isolated from the rest."""
     items = list(connectors)
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
+    timings: dict[str, int] = {}
 
     async def poll(connector: Connector) -> ConnectorBatch:
-        async with semaphore:
-            return await asyncio.wait_for(connector.fetch(), timeout=timeout_s)
+        name = getattr(connector, "name", type(connector).__name__)
+        started = time.perf_counter()
+        try:
+            async with semaphore:
+                return await asyncio.wait_for(connector.fetch(), timeout=timeout_s)
+        finally:
+            timings[name] = int((time.perf_counter() - started) * 1000)
 
     results = await asyncio.gather(*(poll(c) for c in items), return_exceptions=True)
     batches: list[ConnectorBatch] = []
     errors: list[str] = []
     for connector, result in zip(items, results):
+        name = getattr(connector, "name", type(connector).__name__)
+        connector_errors: list[str] = []
+        signals_count = 0
+        truncated = False
+        fingerprint: str | None = None
         if isinstance(result, ConnectorBatch):
             batches.append(result)
-            errors.extend(f"{connector.name}: {e}" for e in result.errors)
+            connector_errors = [f"{name}: {e}" for e in result.errors]
+            signals_count = len(result.signals)
+            truncated = result.truncated
         elif isinstance(result, asyncio.TimeoutError):
-            errors.append(f"{connector.name}: timed out after {timeout_s}s")
+            connector_errors = [f"{name}: timed out after {timeout_s}s"]
         else:
-            errors.append(f"{connector.name}: {type(result).__name__}: {result}")
+            connector_errors = [f"{name}: {type(result).__name__}: {result}"]
+        if isinstance(result, BaseException):
+            fingerprint = error_fingerprint(result)
+        errors.extend(connector_errors)
+        log(
+            "connector.ingest",
+            level="ERROR" if connector_errors else "INFO",
+            fingerprint=fingerprint,
+            connector=name,
+            signals=signals_count,
+            errors=connector_errors[:10],
+            truncated=truncated,
+            duration_ms=timings.get(name, 0),
+        )
 
     signals = sorted(
         (s for batch in batches for s in batch.signals),

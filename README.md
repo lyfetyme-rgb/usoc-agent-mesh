@@ -390,12 +390,17 @@ With the Docker mesh running, start the read-only local dashboard from the
 project directory with `python dashboard/server.py`, then visit
 `http://127.0.0.1:8090`. It reads `secrets/health_token.txt` on the server
 and polls the existing health endpoints; the token is not sent to the browser.
-Set `AGENT_HEALTH_TOKEN_FILE` to use a different token file. Stop it with
-Ctrl+C. The dashboard is a local prototype: it has no login and anyone with
-access to the local port can see the status. Do not expose it to a network.
-Connector counts indicate configuration, not successful ingestion. Incident,
-evidence, and metrics panels are placeholders, not live feeds; Prometheus is
-the proposed next source and is not yet installed by this dashboard.
+Set `AGENT_HEALTH_TOKEN_FILE` to use a different token file, or
+`AGENT_HEALTH_TOKEN` for an inline token. Host and port come from
+`AGENT_HEALTH_HOST` / `AGENT_HEALTH_PORT` (environment or `.env`), so a moved
+health endpoint does not appear as OFFLINE. Stop it with Ctrl+C. The dashboard
+is a local prototype: it has no login and anyone with access to the local port
+can see the status. Do not expose it to a network. Auth, timeout and transport
+failures are labelled separately, and a transient outage keeps the last known
+good values marked STALE instead of presenting guesses as live data. Connector
+counts indicate configuration, not successful ingestion. Incident, evidence,
+and metrics panels are placeholders, not live feeds; Prometheus is the proposed
+next source and is not yet installed by this dashboard.
 
 ### Jira Cloud (read-only)
 

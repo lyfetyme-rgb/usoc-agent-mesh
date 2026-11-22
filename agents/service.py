@@ -22,6 +22,8 @@ import hmac
 import json
 from typing import Awaitable, Callable
 
+from .observability import error_fingerprint, log
+
 Provider = Callable[[str], Awaitable[tuple[int, dict]]]
 
 REASONS = {
@@ -29,9 +31,19 @@ REASONS = {
     401: "Unauthorized",
     404: "Not Found",
     405: "Method Not Allowed",
+    408: "Request Timeout",
+    500: "Internal Server Error",
     503: "Service Unavailable",
 }
 MAX_REQUEST_BYTES = 8 * 1024
+
+
+def _request_path(raw: bytes) -> str:
+    """Best-effort route label for logs; never include query strings or bodies."""
+    try:
+        return raw.decode("latin-1").split("\r\n", 1)[0].split(" ", 2)[1]
+    except (IndexError, UnicodeError, ValueError):
+        return "-"
 
 
 class HealthServer:
@@ -74,7 +86,15 @@ class HealthServer:
                 status, payload = await self._dispatch(raw)
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
             status, payload = 408, {"error": "incomplete request"}
-        except Exception:
+        except Exception as exc:
+            log(
+                "health.server_error",
+                level="ERROR",
+                fingerprint=error_fingerprint(exc),
+                path=_request_path(raw),
+                error_type=type(exc).__name__,
+                error=repr(exc),
+            )
             status, payload = 500, {"error": "internal error"}
         finally:
             body = json.dumps(payload, default=str, separators=(",", ":")).encode("utf-8")

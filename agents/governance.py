@@ -30,7 +30,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .contracts import ActionClass, Classification, RiskLevel
-from .security import Signer, canonical, exclusive_lock, secure_dir, secure_file
+from .security import SecurityError, Signer, canonical, exclusive_lock, secure_dir, secure_file
 
 GOVERNED = frozenset({ActionClass.EXECUTE, ActionClass.CONTAIN})
 TIER_RANK = {
@@ -563,10 +563,14 @@ class FileApprovalStore(InMemoryApprovalStore):
                         self.rejected += 1
                         continue
                 items[req.id] = req
-        except (json.JSONDecodeError, OSError):
-            # A corrupt approval log must not silently grant anything.
-            items = {}
+        except (AttributeError, TypeError, json.JSONDecodeError, OSError):
+            # Fail closed and keep the last known-good state. Clearing the map
+            # here would let the next _save() overwrite every pending approval
+            # with only the newest record after a transient shared-volume fault.
             self.rejected += 1
+            raise SecurityError(
+                "approval store is unreadable; failing closed until an operator repairs it"
+            ) from None
         self._items = items
 
     def _refresh(self) -> None:
@@ -574,8 +578,9 @@ class FileApprovalStore(InMemoryApprovalStore):
             stat = self.path.stat()
         except FileNotFoundError:
             if self._stamp is not None:
-                self._items = {}
-                self._stamp = None
+                raise SecurityError(
+                    "approval store disappeared; failing closed until an operator restores it"
+                ) from None
             return
         stamp = (stat.st_mtime_ns, stat.st_size)
         if stamp != self._stamp:
