@@ -163,7 +163,9 @@ class OpenAICompatibleLLM:
                 usage = payload.get("usage") or {}
                 return LLMResponse(
                     text=text,
-                    data=extract_json(text) if json_schema else None,
+                    # Tool rounds call complete() without a schema, so parsing
+                    # only here would drop every structured tool response.
+                    data=extract_json(text),
                     tokens=int(usage.get("prompt_tokens", 0)) + int(usage.get("completion_tokens", 0)),
                     model=payload.get("model", chosen),
                 )

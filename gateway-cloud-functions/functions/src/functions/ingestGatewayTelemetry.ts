@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { onRequest } from "firebase-functions/v2/https";
 import { config, TTL_MS } from "../config";
 import { resolveGateway, safeHexEqual } from "../lib/auth";
 import { breachAlertId, connectivityAlertId, dedupeKey, describeBreach } from "../lib/alerts";
 import { db, FieldValue, now, paths, Timestamp } from "../lib/firestore";
 import { asRollupDoc, hourKey, mergeRollup } from "../lib/rollups";
+import { logDuration, logError } from "../lib/observability";
 import { detectBreaches } from "../lib/thresholds";
 import {
   HttpError,
@@ -25,6 +27,9 @@ export const ingestGatewayTelemetry = onRequest(async (req, res) => {
     res.set("Allow", "POST").status(405).json({ error: "METHOD_NOT_ALLOWED" });
     return;
   }
+
+  const requestId = header(req, "x-request-id") ?? randomUUID();
+  const started = Date.now();
 
   try {
     const raw = await readRawBody(req, config.maxBodyBytes);
@@ -53,12 +58,20 @@ export const ingestGatewayTelemetry = onRequest(async (req, res) => {
     if (typeof resolved.gateway.globalCriticalLimit === "number") {
       for (const metric of Object.keys(readings)) limitMetrics.add(metric);
     }
-    const metricList = [...limitMetrics];
-    const breachRefs = metricList.map((metric) =>
-      db.doc(`${paths.alerts}/${breachAlertId(gatewayId, metric)}`),
-    );
+    // Two different metric names can sanitize to the same alert document ID.
+    // Deduplicate by final ID so one packet never writes a document twice in a
+    // single Firestore transaction.
+    const breachTargets = new Map<string, { metric: string; ref: ReturnType<typeof db.doc> }>();
+    for (const metric of limitMetrics) {
+      const id = breachAlertId(gatewayId, metric);
+      if (!breachTargets.has(id)) breachTargets.set(id, { metric, ref: db.doc(`${paths.alerts}/${id}`) });
+    }
+    const targets = [...breachTargets.values()];
+    const metricList = targets.map((target) => target.metric);
+    const breachRefs = targets.map((target) => target.ref);
     const connectivityRef = db.doc(`${paths.alerts}/${connectivityAlertId(gatewayId)}`);
 
+    const transactionStarted = Date.now();
     await db.runTransaction(async (tx) => {
       // All reads first — Firestore requires this before any write in a tx.
       const [tokenSnap, gatewaySnap, rollupSnap, ...alertSnaps] = await Promise.all([
@@ -96,6 +109,7 @@ export const ingestGatewayTelemetry = onRequest(async (req, res) => {
         expireAt: Timestamp.fromMillis(receivedAt.toMillis() + TTL_MS),
         breachCount: breaches.length,
         breaches,
+        requestId,
       };
       tx.set(packetRef, packet);
 
@@ -141,6 +155,7 @@ export const ingestGatewayTelemetry = onRequest(async (req, res) => {
             status: "OPEN",
             createdAt: previousAlert?.createdAt ?? receivedAt,
             updatedAt: receivedAt,
+            requestId,
           };
           tx.set(ref, alert);
         } else if (existing?.exists && (existing.data() as AlertDoc).status === "OPEN") {
@@ -154,10 +169,18 @@ export const ingestGatewayTelemetry = onRequest(async (req, res) => {
       }
     });
 
+    logDuration("ingest.transaction", Date.now() - transactionStarted, { request_id: requestId, gateway_id: gatewayId });
     // Data diode: acknowledge only, never return stored data or commands.
-    res.status(204).end();
+    // The trace id echoes back so a gateway can log the exact accepted packet.
+    res.set("X-Request-ID", requestId).status(204).end();
   } catch (error) {
-    console.error("ingestGatewayTelemetry failed", error);
+    logError({
+      source: "ingestGatewayTelemetry",
+      error,
+      requestId,
+      code: error instanceof HttpError ? error.code : undefined,
+    });
+    logDuration("ingest.total", Date.now() - started, { request_id: requestId, outcome: "error" });
     respondWithError(res, error);
   }
 });

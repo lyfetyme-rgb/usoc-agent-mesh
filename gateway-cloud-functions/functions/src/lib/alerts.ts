@@ -1,8 +1,13 @@
 import { config } from "../config";
 import type { AlertKind, BreachInfo } from "../types";
 
+/**
+ * Reversibly escape characters that Firestore does not allow in document IDs.
+ * A plain "_" replacement made `temp.c`, `temp_c` and `temp-c` share one alert
+ * document, so distinct metrics could overwrite each other's alerts.
+ */
 export function sanitizeIdPart(value: string): string {
-  return value.replace(/[^A-Za-z0-9_-]/g, "_");
+  return value.replace(/[^A-Za-z0-9-]/g, (char) => `_${char.codePointAt(0)!.toString(16).padStart(2, "0")}`);
 }
 
 /** Deterministic IDs give one open alert per gateway/metric episode. */

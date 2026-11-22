@@ -5,6 +5,9 @@ import { db, now, paths } from "../lib/firestore";
 import { isStale, offlineCutoff } from "../lib/heartbeat";
 import type { AlertDoc, GatewayDoc } from "../types";
 
+const FIRESTORE_BATCH_LIMIT = 500;
+const WRITES_PER_GATEWAY = 2;
+
 /**
  * Cloud Scheduler runs this every minute, independent of any browser. Gateways
  * silent for more than 180 seconds are flipped to OFFLINE and raise one
@@ -16,19 +19,32 @@ export const checkGatewayHeartbeats = onSchedule(
     const detectedAt = now();
     const cutoff = offlineCutoff(detectedAt.toMillis());
 
-    // Single-field query: works without a composite index. Status is filtered
-    // in code so REVOKED/OFFLINE devices never generate duplicate alerts.
+    // Filter on status in the query as well as in code: already-OFFLINE and
+    // REVOKED gateways keep their old lastSeenAt, so a lastSeenAt-only query
+    // would re-read the entire cumulative outage set on every run.
     const snapshot = await db
       .collectionGroup("gateways")
+      .where("status", "==", "ONLINE")
       .where("lastSeenAt", "<", cutoff)
       .get();
 
-    const batch = db.batch();
+    // Each gateway needs two writes (status + alert). Firestore caps a batch at
+    // 500 operations, so flush at 250 gateways and never lose the tail of a
+    // large outage to a failed commit.
+    const maxGatewaysPerBatch = Math.floor(FIRESTORE_BATCH_LIMIT / WRITES_PER_GATEWAY);
+    let batch = db.batch();
+    let pending = 0;
     let flipped = 0;
+
+    const commitBatch = async (): Promise<void> => {
+      if (pending > 0) await batch.commit();
+      batch = db.batch();
+      pending = 0;
+    };
 
     for (const doc of snapshot.docs) {
       const gateway = doc.data() as GatewayDoc;
-      if (gateway.status === "OFFLINE" || gateway.status === "REVOKED") continue;
+      if (gateway.status !== "ONLINE") continue;
       if (!isStale(gateway.lastSeenAt, cutoff.toMillis())) continue;
 
       const tenantId = doc.ref.parent.parent?.id;
@@ -52,10 +68,13 @@ export const checkGatewayHeartbeats = onSchedule(
         updatedAt: detectedAt,
       };
       batch.set(db.doc(`${paths.alerts}/${connectivityAlertId(gatewayId)}`), alert);
+      pending += WRITES_PER_GATEWAY;
       flipped += 1;
+
+      if (pending >= maxGatewaysPerBatch * WRITES_PER_GATEWAY) await commitBatch();
     }
 
-    if (flipped > 0) await batch.commit();
+    await commitBatch();
     console.log(`Heartbeat check complete: ${flipped} gateway(s) flipped OFFLINE`);
   },
 );

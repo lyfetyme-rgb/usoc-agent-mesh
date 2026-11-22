@@ -516,7 +516,9 @@ class JsonlConnector(Connector):
                             ),
                         )
                     )
-                except ConnectorDataError as exc:
+                except (ConnectorDataError, ValidationError) as exc:
+                    # One malformed record must not discard the other good
+                    # signals from this source.
                     errors.append(f"line {line_no}: {exc}")
         return ConnectorBatch(
             connector=self.name,
@@ -639,7 +641,7 @@ class HttpJsonConnector(Connector):
                         ),
                     )
                 )
-            except ConnectorDataError as exc:
+            except (ConnectorDataError, ValidationError) as exc:
                 errors.append(f"record {index}: {exc}")
         return ConnectorBatch(
             connector=self.name,
