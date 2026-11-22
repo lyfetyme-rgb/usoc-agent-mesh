@@ -152,10 +152,6 @@ export class FakeCollectionRef {
 
 export class FakeBatch {
   private readonly ops: Array<() => void> = [];
-  /** Exposed so tests can assert the 500-operation Firestore batch ceiling. */
-  get opCount(): number {
-    return this.ops.length;
-  }
 
   constructor(private readonly db: FakeFirestore) {}
 
@@ -186,8 +182,6 @@ export class FakeBatch {
 
 export class FakeFirestore {
   readonly store = new Map<string, DocData>();
-  /** Every batch created by the code under test, for batch-size assertions. */
-  readonly batches: FakeBatch[] = [];
   private counter = 0;
 
   nextId(): string {
@@ -226,9 +220,7 @@ export class FakeFirestore {
   }
 
   batch(): FakeBatch {
-    const batch = new FakeBatch(this);
-    this.batches.push(batch);
-    return batch;
+    return new FakeBatch(this);
   }
 
   async runTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T> {

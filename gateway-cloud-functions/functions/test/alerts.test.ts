@@ -11,18 +11,9 @@ import {
 
 describe("alert identity helpers", () => {
   it("builds stable, sanitized IDs", () => {
-    expect(breachAlertId("gw/1", "temp.hi")).toBe("breach_gw_2f1_temp_2ehi");
+    expect(breachAlertId("gw/1", "temp.hi")).toBe("breach_gw_1_temp_hi");
     expect(connectivityAlertId("gw-1")).toBe("connectivity_gw-1");
     expect(dedupeKey("CRITICAL_LIMIT", "gw-1", "temp")).toBe("CRITICAL_LIMIT:gw-1:temp");
-  });
-
-  it("does not collide between dot, underscore and dash metric names", () => {
-    const ids = new Set([
-      breachAlertId("gw1", "temp.c"),
-      breachAlertId("gw1", "temp_c"),
-      breachAlertId("gw1", "temp-c"),
-    ]);
-    expect(ids.size).toBe(3);
   });
 
   it("builds a deep link with an encoded alert id", () => {

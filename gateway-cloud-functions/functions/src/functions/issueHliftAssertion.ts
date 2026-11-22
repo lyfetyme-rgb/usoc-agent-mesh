@@ -2,7 +2,6 @@ import { onRequest } from "firebase-functions/v2/https";
 import { config } from "../config";
 import { resolveIdpIdentity } from "../lib/idp-session";
 import { assertionCookies, signHliftAssertion } from "../lib/hlift-assertion";
-import { logError } from "../lib/observability";
 import { HttpError, applyCors, respondWithError } from "../lib/validation";
 
 /** Fail closed: an unconfigured allowlist authorizes no principals. */
@@ -41,11 +40,6 @@ export const issueHliftAssertion = onRequest(async (req, res) => {
     res.setHeader("Set-Cookie", assertionCookies(token));
     res.redirect(302, config.appBaseUrl);
   } catch (error) {
-    logError({
-      source: "issueHliftAssertion",
-      error,
-      code: error instanceof HttpError ? error.code : undefined,
-    });
     respondWithError(res, error);
   }
 });
