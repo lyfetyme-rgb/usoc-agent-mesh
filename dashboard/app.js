@@ -1,12 +1,27 @@
 const $ = id => document.getElementById(id);
-const set = (id, value) => { const el = $(id); if (el) el.textContent = value ?? "—"; };
+const set = (id, value) => { const el = $(id); if (el) el.textContent = value ?? UNKNOWN; };
 const POLL_MS = 5000;
-const FETCH_TIMEOUT_MS = 4000;
+// Keep the browser timeout above the proxy's upstream timeout (8s) so a slow
+// probe is reported as a timeout rather than an unexplained abort.
+const FETCH_TIMEOUT_MS = 10000;
+const UNKNOWN = "UNKNOWN";
 const RESTRICTED = "NOT EXPOSED";
+const ERROR_LABELS = {
+  auth: "AUTH REQUIRED",
+  timeout: "TIMED OUT",
+  transport: "PROXY OFFLINE",
+  invalid_response: "BAD RESPONSE",
+  http_500: "PROXY ERROR",
+  http_502: "PROXY ERROR",
+  http_503: "PUBLISHER UNAVAILABLE",
+  http_504: "PUBLISHER TIMEOUT",
+};
 
 let inFlight = false;
 let pollTimer = null;
 let failures = 0;
+let lastGood = null;
+let lastGoodAt = null;
 
 function tick() {
   const now = new Date();
@@ -25,51 +40,111 @@ async function getJson(path, timeoutMs = FETCH_TIMEOUT_MS) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(path, {cache:"no-store", signal:controller.signal});
-    if (!response.ok) throw new Error("unavailable");
+    if (!response.ok) {
+      const error = new Error("unavailable");
+      error.status = response.status;
+      throw error;
+    }
     return await response.json();
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      const timeout = new Error("timeout");
+      timeout.reason = "timeout";
+      throw timeout;
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
+}
+
+function reasonLabel(reason) {
+  if (ERROR_LABELS[reason]) return ERROR_LABELS[reason];
+  if (typeof reason === "string" && reason.startsWith("http_")) return `HTTP ${reason.slice(5)}`;
+  return UNKNOWN;
+}
+
+function firstError(errors) {
+  if (!errors) return null;
+  return errors.health || errors.ready || null;
+}
+
+function setSync(text, kind) {
+  set("sync", text);
+  $("sync-dot").className = `dot ${kind}`;
+}
+
+function applyValues(data) {
+  const health = data?.health ?? null;
+  const ready = data?.ready ?? null;
+  const running = health?.agents_running;
+  const expected = health?.agents_expected;
+  const countsKnown = Number.isFinite(running) && Number.isFinite(expected);
+  const readyKnown = typeof ready?.ready === "boolean";
+  const authKnown = typeof health?.message_auth === "boolean";
+  const busKnown = typeof ready?.bus_ok === "boolean";
+
+  set("platform", readyKnown ? (ready.ready ? "OPERATIONAL" : "NOT READY") : UNKNOWN);
+  set("ready-tag", readyKnown ? (ready.ready ? "READY" : "NOT READY") : UNKNOWN);
+  set("runtime", health?.status ?? UNKNOWN);
+  set("transport", busKnown ? (ready.bus_ok ? "Connected" : "Unavailable") : UNKNOWN);
+  set("agents", countsKnown ? `${running} / ${expected}` : UNKNOWN);
+  set("roles", RESTRICTED);
+  set("bus", RESTRICTED);
+  set("auth", authKnown ? (health.message_auth ? "ENABLED" : "DISABLED") : UNKNOWN);
+  const pending = ready?.pending_approvals ?? health?.pending_approvals;
+  set("pending", Number.isFinite(pending) ? pending : UNKNOWN);
+  set("missing", countsKnown ? Math.max(0, expected - running) : UNKNOWN);
+  set("connector-status", RESTRICTED);
+  set("configured", RESTRICTED);
+  set("connectors", RESTRICTED);
+  set("connector-note", "Detailed connector and topology data requires authenticated diagnostics access; it is not published by the health endpoints.");
+}
+
+function rememberGood(data) {
+  lastGood = {health: data?.health ?? null, ready: data?.ready ?? null};
+  lastGoodAt = new Date();
+}
+
+function timestamp(date) {
+  return date.toLocaleTimeString(undefined, {hour12:false});
+}
+
+function markFailure(reason) {
+  failures += 1;
+  if (lastGood) {
+    applyValues(lastGood);
+    setSync(`STALE · ${reasonLabel(reason)}`, "warn");
+    set("updated", `Last good ${timestamp(lastGoodAt)} · retry ${failures}`);
+    set("ready-tag", "STALE");
+    return;
+  }
+  setSync(`OFFLINE · ${reasonLabel(reason)}`, "bad");
+  set("updated", `Status unavailable · retry ${failures}`);
+  for (const id of ["platform","bus","auth","connector-status","agents","roles","pending","runtime","transport","missing","connectors","configured"]) set(id, UNKNOWN);
+  set("ready-tag", UNKNOWN);
+  set("connector-note", "Unable to contact the mesh health service.");
 }
 
 async function refresh() {
   if (inFlight) return;
   inFlight = true;
   try {
-    const {health, ready} = await getJson("/api/status");
-    failures = 0;
-    set("sync", "LIVE STATUS");
-    set("updated", `Updated ${new Date().toLocaleTimeString()}`);
-    $("sync-dot").className = "dot ok";
-
-    const operational = ready?.ready === true;
-    set("platform", operational ? "OPERATIONAL" : "NOT READY");
-    set("ready-tag", operational ? "READY" : "NOT READY");
-    set("runtime", health?.status ?? "UNKNOWN");
-    set("transport", ready?.bus_ok === true ? "Connected" : "Unavailable");
-
-    // /health and /ready intentionally publish counts and flags only — agent
-    // topology, bus type and connector config stay behind diagnostics auth.
-    const running = health?.agents_running;
-    const expected = health?.agents_expected;
-    set("agents", Number.isFinite(running) && Number.isFinite(expected) ? `${running} / ${expected}` : "—");
-    set("roles", RESTRICTED);
-    set("bus", RESTRICTED);
-    set("auth", health?.message_auth === true ? "ENABLED" : "DISABLED");
-    set("pending", ready?.pending_approvals ?? health?.pending_approvals ?? "—");
-    set("missing", Number.isFinite(running) && Number.isFinite(expected) ? Math.max(0, expected - running) : "—");
-    set("connector-status", RESTRICTED);
-    set("configured", RESTRICTED);
-    set("connectors", RESTRICTED);
-    set("connector-note", "Detailed connector and topology data requires authenticated diagnostics access; it is not published by the health endpoints.");
-  } catch {
-    failures += 1;
-    $("sync-dot").className = "dot bad";
-    set("sync", "OFFLINE");
-    set("updated", `Status unavailable · retry ${failures}`);
-    for (const id of ["platform","bus","auth","connector-status","agents","roles","pending","runtime","transport","missing","connectors","configured"]) set(id,"—");
-    set("ready-tag","UNKNOWN");
-    set("connector-note","Unable to contact the mesh health service.");
+    const data = await getJson("/api/status");
+    applyValues(data);
+    const error = firstError(data.errors);
+    if (error) {
+      setSync(`PARTIAL · ${reasonLabel(error)}`, "warn");
+      set("updated", `Partial status ${timestamp(new Date())}`);
+    } else {
+      rememberGood(data);
+      failures = 0;
+      setSync("LIVE STATUS", "ok");
+      set("updated", `Updated ${timestamp(new Date())}`);
+    }
+  } catch (error) {
+    const reason = error?.reason || (error?.status ? `http_${error.status}` : "transport");
+    markFailure(reason);
   } finally {
     inFlight = false;
     scheduleNext();
@@ -79,16 +154,22 @@ async function refresh() {
 function scheduleNext() {
   if (pollTimer) clearTimeout(pollTimer);
   if (document.visibilityState === "hidden") {
-    set("sync", "PAUSED");
+    setSync("PAUSED", "warn");
     return;
   }
+  // Visibility changes never clear `failures`: a returning tab must not burst
+  // through the backoff that was already earned by repeated failures.
   const delay = failures > 0 ? Math.min(POLL_MS * 2 ** Math.min(failures, 3), 60000) : POLL_MS;
   pollTimer = setTimeout(refresh, delay);
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") { failures = 0; refresh(); }
-  else scheduleNext();
+  if (document.visibilityState === "visible") {
+    if (pollTimer) clearTimeout(pollTimer);
+    refresh();
+  } else {
+    scheduleNext();
+  }
 });
 
 $("public-load").addEventListener("click", async () => {
@@ -96,15 +177,16 @@ $("public-load").addEventListener("click", async () => {
   button.disabled = true;
   set("public-message", "Loading historical records from data.wa.gov…");
   try {
-    const data = await getJson("/api/public-data", 20000);
+    const data = await getJson("/api/public-data", 30000);
     set("public-count", data.notification_count);
     set("public-matched", data.notifications_with_details);
     set("public-detail", data.detail_rows);
     set("public-causes", Object.entries(data.causes ?? {}).map(([name, count]) => `${name}: ${count}`).join(" · "));
     set("public-message", `Fetched ${new Date(data.generated_at).toLocaleString()} · limited sample${data.detail_limit_reached ? " · detail limit reached" : ""}. Historical reports, not live incidents.`);
-  } catch {
-    for (const id of ["public-count","public-matched","public-detail","public-causes"]) set(id, "—");
-    set("public-message", "Public data unavailable. Try again when the publisher is reachable.");
+  } catch (error) {
+    for (const id of ["public-count","public-matched","public-detail","public-causes"]) set(id, UNKNOWN);
+    const reason = error?.status ? reasonLabel(`http_${error.status}`) : reasonLabel(error?.reason);
+    set("public-message", `Public data unavailable (${reason}). Try again when the publisher is reachable.`);
   } finally { button.disabled = false; }
 });
 

@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, Field
 
-from .observability import log
+from .observability import error_fingerprint, log
 from .security import SecurityError
 
 
@@ -141,9 +141,11 @@ class OpenAICompatibleLLM:
             }
 
         last_error: Exception | None = None
+        last_status: int | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 resp = await self._client.post("/chat/completions", json=body)
+                last_status = resp.status_code
                 if resp.status_code in (400, 422) and json_schema:
                     # Provider does not support json_schema; ask in prose instead.
                     log("llm.schema_fallback", status=resp.status_code, model=chosen)
@@ -158,23 +160,53 @@ class OpenAICompatibleLLM:
                     raise httpx.HTTPStatusError("retryable", request=resp.request, response=resp)
                 resp.raise_for_status()
                 payload = resp.json()
-                choice = payload["choices"][0]["message"]
+                # Providers occasionally return 200 with an empty or partial
+                # body. Treat that as a retryable fault instead of letting an
+                # IndexError/TypeError escape past the retry budget.
+                choices = payload.get("choices") if isinstance(payload, dict) else None
+                if not isinstance(choices, list) or not choices:
+                    raise ValueError("LLM response contained no choices")
+                choice = choices[0].get("message") if isinstance(choices[0], dict) else None
+                if not isinstance(choice, dict):
+                    raise ValueError("LLM response contained a malformed choice")
                 text = choice.get("content") or ""
                 usage = payload.get("usage") or {}
+                tokens = int(usage.get("prompt_tokens", 0) or 0) + int(
+                    usage.get("completion_tokens", 0) or 0
+                )
                 return LLMResponse(
                     text=text,
                     # Tool rounds call complete() without a schema, so parsing
                     # only here would drop every structured tool response.
                     data=extract_json(text),
-                    tokens=int(usage.get("prompt_tokens", 0)) + int(usage.get("completion_tokens", 0)),
+                    tokens=tokens,
                     model=payload.get("model", chosen),
                 )
-            except (httpx.HTTPError, KeyError, json.JSONDecodeError) as exc:
+            except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
                 if attempt >= self.max_retries:
                     break
+                log(
+                    "llm.retry",
+                    level="WARNING",
+                    model=chosen,
+                    attempt=attempt + 1,
+                    attempts=self.max_retries + 1,
+                    error_type=type(exc).__name__,
+                    status=last_status,
+                )
                 await asyncio.sleep(0.5 * 2**attempt)
                 continue
+        log(
+            "llm.failed",
+            level="ERROR",
+            fingerprint=error_fingerprint(last_error) if last_error else None,
+            model=chosen,
+            attempts=self.max_retries + 1,
+            error_type=type(last_error).__name__ if last_error else "Unknown",
+            status=last_status,
+            error=repr(last_error),
+        )
         raise RuntimeError(f"LLM call failed after {self.max_retries + 1} attempts: {last_error}")
 
     async def close(self) -> None:

@@ -47,7 +47,7 @@ from .contracts import (
 from .evidence import EvidenceChain
 from .governance import DecisionType, GovernanceDecision, PolicyEngine
 from .llm import LLM
-from .observability import Metrics, bound, log
+from .observability import Metrics, bound, log, trace
 from .registry import SubsystemSpec
 from .store import StateStore
 from .tools import ToolRegistry, ToolError
@@ -239,7 +239,11 @@ class BaseAgent:
 
     # -- dispatch -----------------------------------------------------------
     async def _process(self, msg: Message) -> None:
-        with bound(agent=self.id):
+        # Orchestrator steps carry "<trace>:<step>" correlations. Bind the trace
+        # here so agent-side failures, HOLDs and tool calls are greppable by the
+        # same goal id as the orchestrator's events.
+        task_trace = msg.correlation_id.split(":", 1)[0] if msg.correlation_id else "-"
+        with bound(agent=self.id), trace(task_trace):
             try:
                 # Deadlines govern new work, not replies to work already done.
                 if msg.kind in ("task", "query") and msg.expired():
@@ -286,8 +290,8 @@ class BaseAgent:
             cached = await self.store.get(key)
             if cached is not None:
                 self.metrics.inc("task.idempotent_hit")
-                await self.bus.ack(self.id, msg)
                 await self._publish(msg.reply_with(TaskResult.model_validate(cached)))
+                await self.bus.ack(self.id, msg)
                 return
 
         # Shadow runs still leave a signed, verifiable observation of every input
@@ -319,7 +323,6 @@ class BaseAgent:
             )
             if decision.decision is DecisionType.HOLD:
                 self.metrics.inc("policy.hold")
-                await self.bus.ack(self.id, msg)
                 await self._publish(
                     msg.reply_with(
                         Handoff(
@@ -332,6 +335,7 @@ class BaseAgent:
                         )
                     )
                 )
+                await self.bus.ack(self.id, msg)
                 log("policy.hold", approval=decision.approval_ref, target=spec.target)
                 return
             if decision.decision is DecisionType.DENY:
@@ -354,7 +358,6 @@ class BaseAgent:
                 evidence_ref = await self._audit(
                     "shadow.decision", msg, shadow_data, spec
                 )
-                await self.bus.ack(self.id, msg)
                 await self._publish(
                     msg.reply_with(
                         TaskResult(
@@ -375,6 +378,7 @@ class BaseAgent:
                         )
                     )
                 )
+                await self.bus.ack(self.id, msg)
                 return
 
         started = time.perf_counter()
@@ -411,11 +415,11 @@ class BaseAgent:
             await self._reject(msg, ErrorCode.HANDLER, f"{type(exc).__name__}: {exc}")
             return
 
-        await self.bus.ack(self.id, msg)
         if not isinstance(result, TaskResult):
             # A subsystem may answer with Handoff (needs a human) or Failure.
             self.metrics.inc("task.handoff" if isinstance(result, Handoff) else "task.failed")
             await self._publish(msg.reply_with(result))
+            await self.bus.ack(self.id, msg)
             return
 
         # Carry provenance through the mesh: this result names its producer and
@@ -460,6 +464,9 @@ class BaseAgent:
             tokens=result.tokens_used,
         )
         await self._publish(msg.reply_with(result))
+        # ACK last: on Redis a failed publish/evidence write must leave the
+        # message pending for redelivery. Idempotency keys make that safe.
+        await self.bus.ack(self.id, msg)
 
     async def _publish(self, msg: Message) -> None:
         """Runtime-side topic ACL check before the transport sees a message.
@@ -592,11 +599,10 @@ class BaseAgent:
         except Exception as exc:
             await self._reject(msg, ErrorCode.HANDLER, f"query failed: {exc}")
             return
-        await self.bus.ack(self.id, msg)
         await self._publish(msg.reply_with(reply))
+        await self.bus.ack(self.id, msg)
 
     async def _reject(self, msg: Message, code: ErrorCode | str, detail: str) -> None:
-        await self.bus.ack(self.id, msg)
         payload = Failure(
             code=str(code.value if isinstance(code, ErrorCode) else code),
             message=detail,
@@ -605,6 +611,7 @@ class BaseAgent:
         # Only work requests get a failure reply; never bounce errors off replies.
         if msg.kind in ("task", "query"):
             await self._publish(msg.reply_with(payload))
+        await self.bus.ack(self.id, msg)
         log("task.rejected", code=payload.code, detail=detail)
 
     def _idempotency_key(self, msg: Message, spec: TaskSpec) -> str | None:

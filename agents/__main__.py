@@ -655,7 +655,8 @@ def cmd_health(args: argparse.Namespace) -> int:
             print(json.dumps(await mesh.shell.health(), indent=2, default=str))
             issues = await mesh.shell.diagnostics()
             print("\ndiagnostics: " + ("; ".join(issues) if issues else "none"))
-        return 0
+        # Automation uses this documented command as a health check.
+        return 1 if issues else 0
 
     return asyncio.run(run())
 

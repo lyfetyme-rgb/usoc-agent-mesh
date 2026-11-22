@@ -7,6 +7,7 @@ One trace id follows a goal through every agent, so a single grep answers
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import logging
 import sys
@@ -56,7 +57,9 @@ class JsonFormatter(logging.Formatter):
             "agent": agent_id.get(),
             "event": record.getMessage(),
         }
-        for key, value in getattr(record, "fields", {}).items():
+        # Normalise at format time too: host shippers or future callers may
+        # attach `fields` directly, bypassing log()'s emit-time redaction.
+        for key, value in _trim(getattr(record, "fields", {})).items():
             entry[key] = value
         if record.exc_info:
             entry["error"] = redact_text(self.formatException(record.exc_info))
@@ -66,7 +69,7 @@ class JsonFormatter(logging.Formatter):
 class TextFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         base = f"{self.formatTime(record, '%H:%M:%S')} {record.levelname:<5} {trace_id.get():<16} {agent_id.get():<10} {record.getMessage()}"
-        fields = getattr(record, "fields", None)
+        fields = _trim(getattr(record, "fields", {}))
         if fields:
             base += " " + " ".join(f"{k}={v}" for k, v in fields.items())
         if record.exc_info:
@@ -74,9 +77,26 @@ class TextFormatter(logging.Formatter):
         return base
 
 
-def log(event: str, **fields: Any) -> None:
-    """Emit one structured event. Field values are summarised, not dumped."""
-    logging.getLogger("mesh").info(event, extra={"fields": _trim(fields)})
+def log(event: str, *, level: str = "INFO", fingerprint: str | None = None, **fields: Any) -> None:
+    """Emit one structured event. Field values are summarised, not dumped.
+
+    ``level`` lets operators filter real failures from routine INFO chatter;
+    ``fingerprint`` groups repeats of the same fault without leaking volatile
+    identifiers. Trace and agent are captured at emit time so a record remains
+    self-describing even if a host formats it later outside the context.
+    """
+    payload = {"trace": trace_id.get(), "agent": agent_id.get(), **fields}
+    if fingerprint is not None:
+        payload["fingerprint"] = fingerprint
+    severity = getattr(logging, str(level).upper(), logging.INFO)
+    logging.getLogger("mesh").log(severity, event, extra={"fields": _trim(payload)})
+
+
+def error_fingerprint(exc: BaseException) -> str:
+    """Stable group key for an error: type plus a redacted first line."""
+    first = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+    digest = hashlib.sha256(f"{type(exc).__name__}:{redact_text(first)}".encode("utf-8")).hexdigest()
+    return digest[:16]
 
 
 def _trim(fields: dict[str, Any]) -> dict[str, Any]:
@@ -131,8 +151,30 @@ class Metrics:
                 self.inc(f"{name}.le_{bound}")
 
     def snapshot(self) -> dict[str, Any]:
+        summaries: dict[str, dict[str, int]] = {}
+        for name in self.latencies:
+            count = self.counters.get(f"{name}.count", 0)
+            total = self.counters.get(f"{name}.sum_ms", 0)
+
+            def percentile(fraction: float) -> int:
+                if not count:
+                    return 0
+                target = max(1, int(-(-count * fraction // 1)))  # ceil
+                for bound in LATENCY_BUCKETS_MS:
+                    if self.counters.get(f"{name}.le_{bound}", 0) >= target:
+                        return bound
+                return LATENCY_BUCKETS_MS[-1]
+
+            summaries[name] = {
+                "count": count,
+                "sum_ms": total,
+                "avg_ms": round(total / count) if count else 0,
+                "p50_bucket_ms": percentile(0.5),
+                "p95_bucket_ms": percentile(0.95),
+            }
         return {
             "uptime_s": round(time.monotonic() - self._started, 1),
             "counters": dict(sorted(self.counters.items())),
             "latency_buckets_ms": list(LATENCY_BUCKETS_MS),
+            "latencies": summaries,
         }

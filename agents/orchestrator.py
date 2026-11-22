@@ -42,7 +42,7 @@ from .contracts import (
     TaskResult,
 )
 from .llm import EchoLLM, LLM, extract_json
-from .observability import Metrics, log, new_trace, trace
+from .observability import Metrics, error_fingerprint, log, new_trace, trace
 from .registry import Registry, RegistryError, tokens
 
 PLANNER_SYSTEM = """You plan work for a mesh of {count} subsystem agents.
@@ -231,13 +231,30 @@ class Orchestrator:
 
     async def _pump(self) -> None:
         while not self._stopping.is_set():
-            msg = await self.bus.receive(self.id, timeout=1.0)
-            if msg is None:
-                continue
-            future = self._pending.pop(msg.correlation_id, None)
-            if future is not None and not future.done():
-                future.set_result(msg.payload)
-            await self.bus.ack(self.id, msg)
+            try:
+                msg = await self.bus.receive(self.id, timeout=1.0)
+                if msg is None:
+                    continue
+                future = self._pending.pop(msg.correlation_id, None)
+                if future is not None and not future.done():
+                    future.set_result(msg.payload)
+                await self.bus.ack(self.id, msg)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A single Redis timeout or ACK failure must not kill the pump;
+                # otherwise every in-flight goal waits for its step timeout.
+                self.metrics.inc("orchestrator.pump_error")
+                log(
+                    "orchestrator.pump_error",
+                    level="ERROR",
+                    fingerprint=error_fingerprint(exc),
+                    error=repr(exc),
+                )
+                try:
+                    await asyncio.wait_for(self._stopping.wait(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    pass
 
     async def run(self, goal: str) -> GoalResult:
         trace_id = new_trace()
@@ -247,20 +264,63 @@ class Orchestrator:
             try:
                 plan = await asyncio.wait_for(self.planner.plan(goal), timeout=self.settings.plan_timeout_s)
             except Exception as exc:
-                log("goal.plan_failed", error=str(exc))
-                return GoalResult(
-                    goal=goal,
-                    ok=False,
-                    answer=f"Could not plan this goal: {exc}",
-                    correlation_id=trace_id,
-                    elapsed_ms=int((time.perf_counter() - started) * 1000),
+                log(
+                    "goal.plan_failed",
+                    level="ERROR",
+                    fingerprint=error_fingerprint(exc),
+                    error=repr(exc),
                 )
+                return await self._fail_plan(goal, trace_id, started, exc)
 
             await self.bus.publish(
                 Message.event(sender=self.id, name="plan.created", correlation_id=trace_id, data={"steps": len(plan.steps)})
             )
             log("goal.planned", steps=len(plan.steps), plan=[(s.id, s.agent) for s in plan.steps])
             return await self._execute(plan, trace_id, started)
+
+    async def _fail_plan(
+        self, goal: str, trace_id: str, started: float, exc: BaseException
+    ) -> GoalResult:
+        """Give planner outages the same metrics and bus event as other failures."""
+        self.metrics.inc("goal.failed")
+        elapsed = int((time.perf_counter() - started) * 1000)
+        self.metrics.observe("goal.duration_ms", elapsed)
+        reason = f"plan: {type(exc).__name__}: {exc}"
+        log(
+            "goal.failed",
+            level="ERROR",
+            fingerprint=error_fingerprint(exc),
+            stage="plan",
+            reason=reason,
+        )
+        try:
+            await self.bus.publish(
+                Message.event(
+                    sender=self.id,
+                    name="goal.failed",
+                    correlation_id=trace_id,
+                    data={
+                        "reason": reason,
+                        "steps": 0,
+                        "compensations": 0,
+                        "uncompensated": [],
+                    },
+                )
+            )
+        except Exception as publish_exc:
+            log(
+                "goal.failed_event_error",
+                level="ERROR",
+                fingerprint=error_fingerprint(publish_exc),
+                error=repr(publish_exc),
+            )
+        return GoalResult(
+            goal=goal,
+            ok=False,
+            answer=f"Could not plan this goal: {exc}",
+            correlation_id=trace_id,
+            elapsed_ms=elapsed,
+        )
 
     async def _execute(self, plan: Plan, trace_id: str, started: float) -> GoalResult:
         # Planners validate, but a caller can inject a Plan directly. Re-check here

@@ -63,6 +63,32 @@ class Shell:
                 status["error"] = f"{type(exc).__name__}: {exc}"
         return status
 
+    async def _pending_count(self) -> tuple[int, bool]:
+        """Read approval count without letting a store fault fail a probe."""
+        if self.approvals is None:
+            return 0, True
+        try:
+            return len(await self.approvals.pending()), True
+        except Exception:
+            return 0, False
+
+    def _degraded(self, *, bus_ok: bool, approvals_ok: bool) -> tuple[bool, int]:
+        """Count-only degradation signal for public probes (no ids or error text)."""
+        issues = 0
+        if len(self.agents) != len(self.registry.subsystems):
+            issues += 1
+        if getattr(self.bus, "dlq", None):
+            issues += 1
+        if (getattr(self.bus, "stats", {}) or {}).get("unrouted"):
+            issues += 1
+        if not bus_ok:
+            issues += 1
+        if self.fragmentation_error:
+            issues += 1
+        if not approvals_ok:
+            issues += 1
+        return issues > 0, issues
+
     def discovery(self) -> list[dict[str, Any]]:
         return [
             {
@@ -79,20 +105,25 @@ class Shell:
     async def health(self, *, detailed: bool = True) -> dict[str, Any]:
         stats = getattr(self.bus, "stats", {}) or {}
         dlq = getattr(self.bus, "dlq", []) or []
-        pending = await self.approvals.pending() if self.approvals is not None else []
+        pending, approvals_ok = await self._pending_count()
+        degraded, issue_count = self._degraded(bus_ok=True, approvals_ok=approvals_ok)
         if not detailed:
             # Public liveness only: counts and flags, never topology, agent ids,
             # internal endpoints, or configuration error text.
             return {
-                "status": "ok",
+                "status": "degraded" if degraded else "ok",
                 "schema_version": SCHEMA_VERSION,
                 "agents_running": len(self.agents),
                 "agents_expected": len(self.registry.subsystems),
+                "degraded": degraded,
+                "issues": issue_count,
                 "message_auth": getattr(self.bus, "signer", None) is not None,
-                "pending_approvals": len(pending),
+                "pending_approvals": pending,
             }
         return redact_fields(
             {
+                "degraded": degraded,
+                "issues": issue_count,
                 "schema_version": SCHEMA_VERSION,
                 "bus": type(self.bus).__name__,
                 "agents": [
@@ -107,7 +138,7 @@ class Shell:
                     "dead_letters": len(dlq),
                     "unrouted": stats.get("unrouted", 0),
                 },
-                "pending_approvals": len(pending),
+                "pending_approvals": pending,
                 "message_auth": getattr(self.bus, "signer", None) is not None,
                 "fragmentation": self._fragmentation_status(),
             }
@@ -123,22 +154,27 @@ class Shell:
                 bus_ok = bool(await ping())
             except Exception:
                 bus_ok = False
-        pending = await self.approvals.pending() if self.approvals is not None else []
+        pending, approvals_ok = await self._pending_count()
         ok = not missing and bus_ok
+        degraded, issue_count = self._degraded(bus_ok=bus_ok, approvals_ok=approvals_ok)
         if not detailed:
             return ok, {
                 "ready": ok,
                 "agents_running": len(self.agents),
                 "agents_expected": len(self.registry.subsystems),
                 "bus_ok": bus_ok,
-                "pending_approvals": len(pending),
+                "degraded": degraded,
+                "issues": issue_count,
+                "pending_approvals": pending,
             }
         return ok, redact_fields(
             {
                 "ready": ok,
+                "degraded": degraded,
+                "issues": issue_count,
                 "missing_agents": missing,
                 "bus_ok": bus_ok,
-                "pending_approvals": len(pending),
+                "pending_approvals": pending,
                 "roles": self.registry.roles_total,
                 "fragmentation": self._fragmentation_status(),
             }
@@ -154,8 +190,11 @@ class Shell:
         stats = getattr(self.bus, "stats", {}) or {}
         if stats.get("unrouted"):
             issues.append(f"{stats['unrouted']} unrouted broadcasts")
-        if self.approvals is not None and await self.approvals.pending():
-            issues.append(f"{len(await self.approvals.pending())} approvals waiting on a human")
+        pending, approvals_ok = await self._pending_count()
+        if not approvals_ok:
+            issues.append("approval store unavailable")
+        elif pending:
+            issues.append(f"{pending} approvals waiting on a human")
         if self.fragmentation_error:
             issues.append(f"fragmentation disabled: {self.fragmentation_error}")
         return [redact_text(issue) for issue in issues]
