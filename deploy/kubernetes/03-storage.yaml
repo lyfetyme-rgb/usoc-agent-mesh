@@ -1,0 +1,25 @@
+# Replace REPLACE_ME_RWX_STORAGE_CLASS with a ReadWriteMany class in your
+# cluster (EFS CSI on EKS, Filestore/NFS CSI on GKE, Azure Files on AKS).
+#
+# WHY RWX AND NOT AN emptyDir: the control plane and every worker instantiate
+# the same FileApprovalStore and EvidenceChain under AGENT_WORKSPACE. A per-pod
+# volume would fork the approval queue and the signed hash chain, so HPA would
+# silently split brain. This PVC is the Kubernetes equivalent of Compose's
+# shared `mesh-data` named volume -- not a Postgres/S3 backend (not implemented).
+#
+# OS file locks (async_exclusive_lock) are used for cross-process writes; the
+# chosen CSI driver must support flock/fcntl semantics on the mount.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: usoc-mesh-data
+  namespace: usoc-prod
+  labels:
+    app.kubernetes.io/part-of: usoc-mesh
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: "REPLACE_ME_RWX_STORAGE_CLASS"
+  resources:
+    requests:
+      storage: 20Gi

@@ -1,0 +1,271 @@
+# Stateless bus consumers. Same image, same shared RWX /data, different agent
+# filter. Workers never run the orchestrator and are the only things the HPA
+# scales. Add a Deployment per coordinator you want to scale out; `oekp` and
+# `bengal` are the shipped examples (see docker-compose.workers.example.yml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: usoc-oekp-worker
+  namespace: usoc-prod
+  labels:
+    app: usoc-worker
+    agent: oekp
+    app.kubernetes.io/part-of: usoc-mesh
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: usoc-worker
+      agent: oekp
+  template:
+    metadata:
+      labels:
+        app: usoc-worker
+        agent: oekp
+        app.kubernetes.io/part-of: usoc-mesh
+    spec:
+      serviceAccountName: usoc-worker-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/lyfetyme-rgb/usoc-mesh:0.2.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "agents", "worker", "--agents", "oekp", "--host", "0.0.0.0", "--port", "8091"]
+          envFrom:
+            - configMapRef:
+                name: usoc-mesh-config
+          env:
+            - name: AGENT_HEALTH_PORT
+              value: "8091"
+            - name: AGENT_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: usoc-mesh-secrets
+                  key: redis-url
+            - name: AGENT_SHARED_SECRET_FILE
+              value: "/run/secrets/agent_shared_secret"
+            - name: AGENT_HEALTH_TOKEN_FILE
+              value: "/run/secrets/health_token"
+          ports:
+            - name: health
+              containerPort: 8091
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command: ["python", "-m", "agents", "probe", "--url", "http://127.0.0.1:8091/health"]
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["python", "-m", "agents", "probe", "--url", "http://127.0.0.1:8091/ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp-scratch
+              mountPath: /tmp
+            - name: secrets
+              mountPath: /run/secrets
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: usoc-mesh-data
+        - name: tmp-scratch
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: secrets
+          secret:
+            secretName: usoc-mesh-secrets
+            defaultMode: 0400
+            items:
+              - key: agent-shared-secret
+                path: agent_shared_secret
+              - key: health-token
+                path: health_token
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: usoc-oekp-worker-hpa
+  namespace: usoc-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: usoc-oekp-worker
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: usoc-bengal-worker
+  namespace: usoc-prod
+  labels:
+    app: usoc-worker
+    agent: bengal
+    app.kubernetes.io/part-of: usoc-mesh
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: usoc-worker
+      agent: bengal
+  template:
+    metadata:
+      labels:
+        app: usoc-worker
+        agent: bengal
+        app.kubernetes.io/part-of: usoc-mesh
+    spec:
+      serviceAccountName: usoc-worker-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/lyfetyme-rgb/usoc-mesh:0.2.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "agents", "worker", "--agents", "bengal", "--host", "0.0.0.0", "--port", "8092"]
+          envFrom:
+            - configMapRef:
+                name: usoc-mesh-config
+          env:
+            - name: AGENT_HEALTH_PORT
+              value: "8092"
+            - name: AGENT_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: usoc-mesh-secrets
+                  key: redis-url
+            - name: AGENT_SHARED_SECRET_FILE
+              value: "/run/secrets/agent_shared_secret"
+            - name: AGENT_HEALTH_TOKEN_FILE
+              value: "/run/secrets/health_token"
+          ports:
+            - name: health
+              containerPort: 8092
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command: ["python", "-m", "agents", "probe", "--url", "http://127.0.0.1:8092/health"]
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["python", "-m", "agents", "probe", "--url", "http://127.0.0.1:8092/ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp-scratch
+              mountPath: /tmp
+            - name: secrets
+              mountPath: /run/secrets
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: usoc-mesh-data
+        - name: tmp-scratch
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: secrets
+          secret:
+            secretName: usoc-mesh-secrets
+            defaultMode: 0400
+            items:
+              - key: agent-shared-secret
+                path: agent_shared_secret
+              - key: health-token
+                path: health_token
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: usoc-bengal-worker-hpa
+  namespace: usoc-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: usoc-bengal-worker
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: usoc-worker-sa
+  namespace: usoc-prod
+  labels:
+    app.kubernetes.io/part-of: usoc-mesh

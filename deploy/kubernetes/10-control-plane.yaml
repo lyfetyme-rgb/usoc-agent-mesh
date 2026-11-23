@@ -1,0 +1,147 @@
+# Single control-plane process: it owns the orchestrator, HITL approvals and
+# the evidence chain. Do NOT scale this deployment -- use the worker HPA in
+# 11-workers.yaml instead. One writer per signed chain is a security invariant.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: usoc-mesh
+  namespace: usoc-prod
+  labels:
+    app: usoc-mesh
+    role: control-plane
+    app.kubernetes.io/part-of: usoc-mesh
+spec:
+  replicas: 1
+  minReadySeconds: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: usoc-mesh
+      role: control-plane
+  template:
+    metadata:
+      labels:
+        app: usoc-mesh
+        role: control-plane
+        app.kubernetes.io/part-of: usoc-mesh
+    spec:
+      serviceAccountName: usoc-mesh-sa
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mesh
+          image: ghcr.io/lyfetyme-rgb/usoc-mesh:0.2.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "agents", "serve", "--host", "0.0.0.0", "--port", "8080"]
+          envFrom:
+            - configMapRef:
+                name: usoc-mesh-config
+          env:
+            - name: AGENT_HEALTH_PORT
+              value: "8080"
+            - name: AGENT_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: usoc-mesh-secrets
+                  key: redis-url
+            - name: AGENT_SHARED_SECRET_FILE
+              value: "/run/secrets/agent_shared_secret"
+            - name: AGENT_HEALTH_TOKEN_FILE
+              value: "/run/secrets/health_token"
+            - name: AGENT_ADMIN_TOKEN_FILE
+              value: "/run/secrets/admin_token"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # exec probes reuse the installed CLI, which reads the token from the
+          # mounted secret file. No bearer token is ever written into this
+          # manifest, the pod env, or a browser.
+          livenessProbe:
+            exec:
+              command: ["python", "-m", "agents", "probe", "--url", "http://127.0.0.1:8080/health"]
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["python", "-m", "agents", "probe", "--url", "http://127.0.0.1:8080/ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp-scratch
+              mountPath: /tmp
+            - name: secrets
+              mountPath: /run/secrets
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: usoc-mesh-data
+        - name: tmp-scratch
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: secrets
+          secret:
+            secretName: usoc-mesh-secrets
+            defaultMode: 0400
+            items:
+              - key: agent-shared-secret
+                path: agent_shared_secret
+              - key: health-token
+                path: health_token
+              - key: admin-token
+                path: admin_token
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: usoc-mesh-sa
+  namespace: usoc-prod
+  labels:
+    app.kubernetes.io/part-of: usoc-mesh
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: usoc-mesh
+  namespace: usoc-prod
+  labels:
+    app: usoc-mesh
+    role: control-plane
+spec:
+  type: ClusterIP
+  selector:
+    app: usoc-mesh
+    role: control-plane
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

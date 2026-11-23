@@ -846,6 +846,15 @@ capabilities and `no-new-privileges`. Redis has a required password and lives on
 an internal network; only the read-only health port is published, bound to
 loopback. `/data` holds approvals and evidence on a named volume.
 
+For a clustered deployment, see [`deploy/kubernetes/README.md`](deploy/kubernetes/README.md).
+It provides hardened manifests (restricted Pod Security, read-only rootfs,
+exec probes that read the health token from a secret file, default-deny
+NetworkPolicies, a server-side dashboard proxy and worker HPAs). It also records
+what is deliberately **not** implemented: Postgres approvals, S3 Object Lock
+(WORM) evidence, an Atlassian egress proxy and a Helm chart. Shared `ReadWriteMany`
+storage is required because approvals and the signed evidence chain are
+file-backed; the control plane stays at one replica and only workers scale.
+
 To use the fragmentation layer in the container, copy `connectors.example.yaml`
 to `connectors.yaml`, review the mappings, uncomment the two read-only mounts in
 `docker-compose.yml`, and set `AGENT_CONNECTORS_FILE=/app/connectors.yaml`.

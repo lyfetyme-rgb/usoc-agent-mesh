@@ -1,0 +1,128 @@
+# Dedicated server-side proxy. The browser talks only to this Service; the
+# health token is read from a mounted Secret here and added to upstream calls.
+# The proxy has no admin token, so /diagnostics is unreachable from a browser.
+# Service is intentionally ClusterIP: put an authenticating ingress/OAuth2
+# proxy in front of it before exposing it outside the cluster (see README).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: usoc-dashboard-proxy
+  namespace: usoc-prod
+  labels:
+    app: dashboard-proxy
+    app.kubernetes.io/part-of: usoc-mesh
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dashboard-proxy
+  template:
+    metadata:
+      labels:
+        app: dashboard-proxy
+        app.kubernetes.io/part-of: usoc-mesh
+    spec:
+      serviceAccountName: dashboard-proxy-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: ghcr.io/lyfetyme-rgb/usoc-dashboard:0.2.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/app/dashboard/server.py"]
+          env:
+            - name: AGENT_HEALTH_HOST
+              value: "usoc-mesh"
+            - name: AGENT_HEALTH_PORT
+              value: "8080"
+            - name: AGENT_HEALTH_TOKEN_FILE
+              value: "/run/secrets/health_token"
+            - name: USOC_DASHBOARD_HOST
+              value: "0.0.0.0"
+            - name: USOC_DASHBOARD_PORT
+              value: "8090"
+            # Non-loopback binds fail closed unless the exact served names are
+            # listed here (DNS-rebinding defence in dashboard/server.py).
+            - name: USOC_DASHBOARD_ALLOWED_HOSTS
+              value: "usoc-dashboard,usoc-dashboard.usoc-prod.svc.cluster.local,localhost,127.0.0.1"
+          ports:
+            - name: http
+              containerPort: 8090
+              protocol: TCP
+          # Loopback exec probes: kubelet httpGet sends a pod-IP Host header,
+          # which the DNS-rebinding allowlist below correctly rejects.
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/status', timeout=3).read()"]
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/status', timeout=3).read()"]
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: tmp-scratch
+              mountPath: /tmp
+            - name: secrets
+              mountPath: /run/secrets
+              readOnly: true
+      volumes:
+        - name: tmp-scratch
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: secrets
+          secret:
+            secretName: usoc-mesh-secrets
+            defaultMode: 0400
+            items:
+              - key: health-token
+                path: health_token
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard-proxy-sa
+  namespace: usoc-prod
+  labels:
+    app.kubernetes.io/part-of: usoc-mesh
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: usoc-dashboard
+  namespace: usoc-prod
+  labels:
+    app: dashboard-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app: dashboard-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8090
+      protocol: TCP

@@ -94,6 +94,51 @@ def test_http_surface_is_loopback_only_and_sends_hardening_headers(monkeypatch):
         thread.join(timeout=5)
 
 
+def test_dashboard_bind_defaults_to_loopback(monkeypatch):
+    monkeypatch.delenv("USOC_DASHBOARD_HOST", raising=False)
+    monkeypatch.delenv("USOC_DASHBOARD_ALLOWED_HOSTS", raising=False)
+    assert server_module.bind_address() == "127.0.0.1"
+    assert server_module.allowed_dashboard_hosts() == frozenset()
+
+
+def test_dashboard_non_loopback_bind_fails_closed_without_host_allowlist(monkeypatch):
+    monkeypatch.setenv("USOC_DASHBOARD_HOST", "0.0.0.0")
+    monkeypatch.delenv("USOC_DASHBOARD_ALLOWED_HOSTS", raising=False)
+    try:
+        server_module.bind_address()
+    except RuntimeError as exc:
+        assert "USOC_DASHBOARD_ALLOWED_HOSTS" in str(exc)
+    else:
+        raise AssertionError("off-loopback bind without an allowlist was accepted")
+
+
+def test_dashboard_host_allowlist_accepts_only_configured_names(monkeypatch):
+    monkeypatch.setenv("USOC_DASHBOARD_HOST", "0.0.0.0")
+    monkeypatch.setenv(
+        "USOC_DASHBOARD_ALLOWED_HOSTS",
+        "usoc-dashboard, usoc-dashboard.usoc-prod.svc.cluster.local",
+    )
+    assert server_module.bind_address() == "0.0.0.0"
+    assert server_module.allowed_dashboard_hosts() == {
+        "usoc-dashboard",
+        "usoc-dashboard.usoc-prod.svc.cluster.local",
+    }
+
+    class DummyServer:
+        server_address = ("0.0.0.0", 8090)
+        headers: dict[str, str] = {}
+
+    handler = object.__new__(server_module.Handler)
+    handler.server = DummyServer()
+    handler.headers = {}
+    for host in ("usoc-dashboard", "usoc-dashboard:8090", "127.0.0.1:8090"):
+        handler.headers = {"Host": host}
+        assert handler._host_allowed(), host
+    for host in ("evil.example", "usoc-dashboard.evil.example"):
+        handler.headers = {"Host": host}
+        assert not handler._host_allowed(), host
+
+
 def test_browser_contract_avoids_false_timeouts_stale_states_and_overflow():
     app = (DASHBOARD / "app.js").read_text(encoding="utf-8")
     html = (DASHBOARD / "index.html").read_text(encoding="utf-8")
