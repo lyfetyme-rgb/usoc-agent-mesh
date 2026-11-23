@@ -817,6 +817,42 @@ def cmd_health(args: argparse.Namespace) -> int:
     return asyncio.run(run())
 
 
+async def _redis_reachable(url: str) -> bool:
+    """One-off production preflight: authenticated Redis/Valkey PING."""
+    import redis.asyncio as aioredis
+
+    client = aioredis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
+    try:
+        return bool(await client.ping())
+    finally:
+        await client.aclose()
+
+
+async def _postgres_reachable(dsn: str) -> bool:
+    """One-off production preflight: a real Postgres connection and SELECT 1."""
+    import psycopg  # type: ignore[import-not-found]
+
+    connection = await psycopg.AsyncConnection.connect(dsn, connect_timeout=3)
+    async with connection:
+        await connection.execute("SELECT 1")
+    return True
+
+
+async def _worm_bucket_reachable(settings: Settings) -> bool:
+    """One-off production preflight: assume role/credentials and head the bucket."""
+    import boto3  # type: ignore[import-not-found]
+    from botocore.config import Config  # type: ignore[import-not-found]
+
+    client = boto3.client(
+        "s3",
+        region_name=settings.archive_region,
+        endpoint_url=settings.archive_endpoint_url,
+        config=Config(connect_timeout=3, read_timeout=3, retries={"max_attempts": 0}),
+    )
+    client.head_bucket(Bucket=settings.archive_bucket or "")
+    return True
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     settings = _settings(args)
     failures = 0
@@ -931,29 +967,41 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     if settings.bus == "redis":
         try:
-            import redis.asyncio as aioredis
-
-            async def ping() -> bool:
-                client = aioredis.from_url(
-                    settings.redis_url,
-                    socket_connect_timeout=2,
-                    socket_timeout=2,
-                )
-                try:
-                    return bool(await client.ping())
-                finally:
-                    await client.aclose()
-
             from urllib.parse import urlparse
 
             safe_url = redact_url(settings.redis_url)
-            check(asyncio.run(ping()), "redis reachable", safe_url)
+            check(asyncio.run(_redis_reachable(settings.redis_url)), "redis reachable", safe_url)
             has_password = bool(urlparse(settings.redis_url).password)
             check(has_password, "redis credentials", "password configured" if has_password else "no password in URL")
+            tls = urlparse(settings.redis_url).scheme == "rediss"
+            if is_local_dev(settings):
+                check(True, "redis tls", "plaintext allowed for local dev")
+            else:
+                check(tls, "redis tls", "rediss:// is required outside local dev")
         except Exception as exc:
             check(False, "redis reachable", f"{redact_url(settings.redis_url)} ({exc})")
     else:
         check(True, "bus", "memory (single process)")
+
+    if settings.postgres_dsn:
+        safe_dsn = redact_url(settings.postgres_dsn)
+        try:
+            ok = asyncio.run(_postgres_reachable(settings.postgres_dsn))
+            check(ok, "postgres reachable", safe_dsn)
+        except Exception as exc:
+            check(False, "postgres reachable", f"{safe_dsn} ({type(exc).__name__}: {exc})")
+
+    if settings.archive_backend == "s3":
+        sse = "aws:kms" if settings.archive_sse_kms_key_id else "AES256"
+        try:
+            ok = asyncio.run(_worm_bucket_reachable(settings))
+            check(ok, "worm bucket reachable", f"bucket={settings.archive_bucket} sse={sse}")
+        except Exception as exc:
+            check(
+                False,
+                "worm bucket reachable",
+                f"bucket={settings.archive_bucket} ({type(exc).__name__}: {exc})",
+            )
 
     if settings.llm_base_url:
         check(bool(settings.llm_api_key), "model endpoint", f"{redact_url(settings.llm_base_url)} model={settings.model}")

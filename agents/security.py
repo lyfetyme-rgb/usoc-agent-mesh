@@ -148,6 +148,8 @@ def is_local_dev(settings: Any) -> bool:
         return False
     if getattr(settings, "strict_prod", False):
         return False
+    if str(getattr(settings, "env", "") or "").strip().lower() in ("production", "prod"):
+        return False
     if str(getattr(settings, "bus", "memory") or "memory").lower() != "memory":
         return False
     if getattr(settings, "postgres_dsn", None) or getattr(settings, "archive_bucket", None):

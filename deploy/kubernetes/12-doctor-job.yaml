@@ -1,0 +1,95 @@
+# One-off production preflight. Runs the same doctor checks the pods use, but
+# as a short-lived Job before traffic is shifted. No service, no listener, and
+# no writable state beyond /tmp. The helpers behind `postgres reachable`,
+# `worm bucket reachable` and `redis reachable` perform real connectivity and
+# credential checks against the managed endpoints.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: usoc-doctor-preflight
+  namespace: usoc-prod
+  labels:
+    app: usoc-doctor
+    app.kubernetes.io/part-of: usoc-mesh
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: usoc-doctor
+        app.kubernetes.io/part-of: usoc-mesh
+    spec:
+      restartPolicy: Never
+      serviceAccountName: usoc-mesh-sa
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: doctor
+          image: ghcr.io/lyfetyme-rgb/usoc-mesh:0.2.1
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "agents", "doctor"]
+          envFrom:
+            - configMapRef:
+                name: usoc-mesh-config
+          env:
+            - name: AGENT_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: usoc-mesh-secrets
+                  key: redis-url
+            - name: AGENT_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: usoc-mesh-secrets
+                  key: postgres-dsn
+            - name: AGENT_SHARED_SECRET_FILE
+              value: "/run/secrets/agent_shared_secret"
+            - name: AGENT_ARCHIVE_SECRET_FILE
+              value: "/run/secrets/archive_secret"
+            - name: AGENT_HEALTH_TOKEN_FILE
+              value: "/run/secrets/health_token"
+            - name: AGENT_ADMIN_TOKEN_FILE
+              value: "/run/secrets/admin_token"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: tmp-scratch
+              mountPath: /tmp
+            - name: secrets
+              mountPath: /run/secrets
+              readOnly: true
+      volumes:
+        - name: tmp-scratch
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: secrets
+          secret:
+            secretName: usoc-mesh-secrets
+            defaultMode: 0400
+            items:
+              - key: agent-shared-secret
+                path: agent_shared_secret
+              - key: archive-secret
+                path: archive_secret
+              - key: health-token
+                path: health_token
+              - key: admin-token
+                path: admin_token

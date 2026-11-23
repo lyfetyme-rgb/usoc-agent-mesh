@@ -61,6 +61,7 @@ class S3WormArchiveSink:
         endpoint_url: str | None = None,
         retention_days: int = 2_555,
         lock_mode: str = "COMPLIANCE",
+        sse_kms_key_id: str | None = None,
         segment_size: int = 512,
         client: Any | None = None,
     ) -> None:
@@ -74,6 +75,9 @@ class S3WormArchiveSink:
             raise ValueError("lock_mode must be GOVERNANCE or COMPLIANCE")
         if segment_size < 1:
             raise ValueError("segment_size must be positive")
+        if sse_kms_key_id is not None and not str(sse_kms_key_id).strip():
+            raise ValueError("sse_kms_key_id must not be empty when configured")
+        self.sse_kms_key_id = str(sse_kms_key_id).strip() if sse_kms_key_id else None
         self.bucket = bucket
         self.secret = secret
         self.prefix = prefix.rstrip("/")
@@ -173,6 +177,15 @@ class S3WormArchiveSink:
     def _retain_until(self) -> datetime:
         return datetime.now(timezone.utc) + timedelta(days=self.retention_days)
 
+    def _sse_params(self) -> dict[str, str]:
+        """SSE-KMS when a key is configured, S3-managed AES256 otherwise."""
+        if self.sse_kms_key_id:
+            return {
+                "ServerSideEncryption": "aws:kms",
+                "SSEKMSKeyId": self.sse_kms_key_id,
+            }
+        return {"ServerSideEncryption": "AES256"}
+
     async def flush(self) -> None:
         """Upload buffered records as tenant-scoped WORM-locked segments."""
         for tenant, state in list(self._chains.items()):
@@ -191,7 +204,7 @@ class S3WormArchiveSink:
                         Key=key,
                         Body=body,
                         ContentType="application/x-ndjson",
-                        ServerSideEncryption="AES256",
+                        **self._sse_params(),
                         ObjectLockMode=self.lock_mode,
                         ObjectLockRetainUntilDate=self._retain_until(),
                     )
@@ -287,6 +300,7 @@ class S3WormArchiveSink:
             "prefix": self.prefix,
             "lock_mode": self.lock_mode,
             "retention_days": self.retention_days,
+            "sse": "aws:kms" if self.sse_kms_key_id else "AES256",
             "tenants": len(self._chains),
             "records": self.written + self.pending,
             "segments": sum(len(state.segments) for state in self._chains.values()),

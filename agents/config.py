@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # Fail-closed production mode. Requires managed key files, per-coordinator
     # Ed25519 bus keys and a detached-signature-bound approver registry.
     strict_prod: bool = False
+    # Operator-facing deployment hint. AGENT_ENV=production makes an ephemeral
+    # HMAC key a startup error even when the stricter Ed25519/registry mode is
+    # not yet enabled; AGENT_STRICT_PROD remains the full hardened contract.
+    env: str | None = None
 
     # Per-coordinator bus identities. ``bus_public_keys_file`` is a mounted JSON
     # trust bundle {agent_id: {kid: hex_or_pem_public_key}}; every node gets it,
@@ -180,6 +184,12 @@ class Settings(BaseSettings):
     # OEKP/BENGAL compliance export formats (comma-separated).
     evidence_export_formats: str = "jsonl"
 
+    @field_validator("env")
+    @classmethod
+    def _normalize_env(cls, value: str | None) -> str | None:
+        normalized = str(value).strip().lower() if value is not None else ""
+        return normalized or None
+
     @field_validator("approval_quorum")
     @classmethod
     def _positive_quorum(cls, value: int) -> int:
@@ -283,6 +293,9 @@ class Settings(BaseSettings):
     archive_endpoint_url: str | None = None
     archive_retention_days: int = 2_555  # ~7 years of WORM retention
     archive_lock_mode: Literal["GOVERNANCE", "COMPLIANCE"] = "COMPLIANCE"
+    # Optional SSE-KMS key ARN/alias. Empty uses S3-managed AES256; production
+    # buckets that mandate a customer-managed key should set this explicitly.
+    archive_sse_kms_key_id: str | None = None
 
     # Fail startup outside local dev when signing rests on an ephemeral,
     # per-process HMAC key. Ed25519/KMS modes use persistent keys and are fine.

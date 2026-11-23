@@ -43,7 +43,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: mesh
-          image: ghcr.io/lyfetyme-rgb/usoc-mesh:0.2.0
+          image: ghcr.io/lyfetyme-rgb/usoc-mesh:0.2.1
           imagePullPolicy: IfNotPresent
           command: ["python", "-m", "agents", "serve", "--host", "0.0.0.0", "--port", "8080"]
           envFrom:

@@ -75,3 +75,31 @@ def test_backend_settings_fail_closed_when_incomplete():
         _opts(approval_backend="postgres", postgres_dsn=None)
     with pytest.raises(ValueError, match="AGENT_ARCHIVE_BUCKET"):
         _opts(archive_backend="s3", archive_bucket=None)
+
+
+def test_agent_env_production_requires_a_persistent_key():
+    settings = _opts(env="production", shared_secret=None, shared_secret_file=None)
+    assert settings.env == "production"
+    assert is_local_dev(settings) is False
+    with pytest.raises(SecurityError, match="AGENT_SHARED_SECRET"):
+        build_signer(settings)
+
+
+def test_agent_env_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("AGENT_ENV", "PRODUCTION")
+    monkeypatch.delenv("AGENT_SHARED_SECRET", raising=False)
+    monkeypatch.delenv("AGENT_SHARED_SECRET_FILE", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.env == "production"
+    assert is_local_dev(settings) is False
+
+
+async def test_serve_refuses_to_listen_without_a_persistent_key(monkeypatch):
+    from argparse import Namespace
+
+    from agents.__main__ import _run_serve
+
+    settings = _opts(env="production", shared_secret=None, shared_secret_file=None)
+    monkeypatch.setattr("agents.__main__._settings", lambda _args: settings)
+    with pytest.raises(SecurityError, match="AGENT_SHARED_SECRET"):
+        await _run_serve(Namespace())
