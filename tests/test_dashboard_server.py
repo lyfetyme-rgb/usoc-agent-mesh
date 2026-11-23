@@ -110,3 +110,36 @@ def test_browser_contract_avoids_false_timeouts_stale_states_and_overflow():
     assert "overflow-wrap:anywhere" in style
     assert ".dot.warn" in style
     assert "--muted:#637c84" not in style
+
+
+def test_dashboard_applies_ops_console_ux_controls():
+    """UI/UX Pro Max direction: keyboard/touch, busy feedback, reduced motion."""
+    app = (DASHBOARD / "app.js").read_text(encoding="utf-8")
+    html = (DASHBOARD / "index.html").read_text(encoding="utf-8")
+    style = (DASHBOARD / "style.css").read_text(encoding="utf-8")
+
+    # Explicit pause/resume and manual refresh keep background work controllable.
+    assert 'id="live-toggle"' in html
+    assert 'aria-pressed="false"' in html
+    assert 'id="refresh-now"' in html
+    assert "let paused = false;" in app
+    assert 'setAttribute("aria-pressed", String(paused))' in app
+
+    # Loading feedback is announced and the panel is marked busy during fetch.
+    assert 'id="public-panel" aria-busy="false"' in html
+    assert 'setAttribute("aria-busy", "true")' in app
+    assert 'setAttribute("aria-busy", "false")' in app
+
+    # SVG icons instead of glyph icons; no external font request under the CSP.
+    assert "<svg" in html
+    assert "◐" not in html and "⌁" not in html
+    assert "@import" not in style
+    assert "fonts.googleapis" not in style
+
+    # Accessibility and dense-console tokens from the verified design direction.
+    assert ":focus-visible" in style
+    assert "min-height:44px" in style
+    assert "prefers-reduced-motion" in style
+    assert "--ok:#22c55e" in style
+    assert "--warn:#fbbf24" in style
+    assert "--bad:#ef4444" in style
