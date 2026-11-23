@@ -37,6 +37,7 @@ class Shell:
         *,
         fragmentation: Any = None,
         fragmentation_error: str | None = None,
+        ledger: Any = None,
     ) -> None:
         self.registry = registry
         self.agents = agents
@@ -45,6 +46,7 @@ class Shell:
         self.approvals = approvals
         self.fragmentation = fragmentation
         self.fragmentation_error = fragmentation_error
+        self.ledger = ledger
 
     def _fragmentation_status(self) -> dict[str, Any]:
         status: dict[str, Any] = {
@@ -119,6 +121,7 @@ class Shell:
                 "issues": issue_count,
                 "message_auth": getattr(self.bus, "signer", None) is not None,
                 "pending_approvals": pending,
+                "tasks": self.ledger.counts() if self.ledger is not None else {},
             }
         return redact_fields(
             {
@@ -132,6 +135,7 @@ class Shell:
                 ],
                 "roles": self.registry.roles_total,
                 "metrics": self.metrics.snapshot(),
+                "task_ledger": self.ledger.snapshot() if self.ledger is not None else {},
                 "transport": {
                     "published": stats.get("published", 0),
                     "delivered": stats.get("delivered", 0),
@@ -197,4 +201,8 @@ class Shell:
             issues.append(f"{pending} approvals waiting on a human")
         if self.fragmentation_error:
             issues.append(f"fragmentation disabled: {self.fragmentation_error}")
+        if self.ledger is not None:
+            counts = self.ledger.counts()
+            if counts.get("tasks_unresolved"):
+                issues.append(f"{counts['tasks_unresolved']} unresolved tasks")
         return [redact_text(issue) for issue in issues]

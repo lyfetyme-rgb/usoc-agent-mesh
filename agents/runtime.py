@@ -50,6 +50,7 @@ from .llm import LLM
 from .observability import Metrics, bound, log, trace
 from .registry import SubsystemSpec
 from .store import StateStore
+from .task_ledger import TaskLedger
 from .tools import ToolRegistry, ToolError
 
 
@@ -149,6 +150,7 @@ class BaseAgent:
         policy: PolicyEngine | None = None,
         evidence: EvidenceChain | None = None,
         approvals: Any | None = None,
+        ledger: TaskLedger | None = None,
     ) -> None:
         self.spec = spec
         self.id = spec.id
@@ -162,6 +164,7 @@ class BaseAgent:
         self.policy = policy
         self.evidence = evidence
         self.approvals = approvals
+        self.ledger = ledger
         self.pending = Pending()
         self._in_flight: set[str] = set()
         self._sem = asyncio.Semaphore(settings.max_concurrency)
@@ -181,6 +184,35 @@ class BaseAgent:
             code=NO_LLM_CODE,
             message=f"{self.id} is deterministic (no LLM); use its deterministic handler",
         )
+
+    def _ledger(
+        self,
+        msg: Message,
+        state: str,
+        *,
+        ok: bool | None = None,
+        resolved: bool | None = None,
+        latency_ms: int | None = None,
+        tokens: int = 0,
+        reason: str | BaseException | None = None,
+    ) -> None:
+        """Record one redacted lifecycle transition; telemetry never breaks work."""
+        if self.ledger is None:
+            return
+        try:
+            self.ledger.record(
+                agent_id=self.id,
+                state=state,
+                correlation_id=msg.correlation_id,
+                attempt=msg.attempt,
+                ok=ok,
+                resolved=resolved,
+                latency_ms=latency_ms,
+                tokens=tokens,
+                reason=reason,
+            )
+        except Exception:  # pragma: no cover - observation must not change control flow
+            log("ledger.record_failed", state=state)
 
     # -- lifecycle ----------------------------------------------------------
     async def start(self) -> None:
@@ -247,6 +279,7 @@ class BaseAgent:
             try:
                 # Deadlines govern new work, not replies to work already done.
                 if msg.kind in ("task", "query") and msg.expired():
+                    self._ledger(msg, "deadline", ok=False, resolved=False, reason="message expired before processing")
                     await self._reject(msg, ErrorCode.DEADLINE, "message expired before processing")
                     return
                 if isinstance(msg.payload, TaskSpec):
@@ -268,6 +301,7 @@ class BaseAgent:
         # -- replay guard: drop a task already being processed in this agent --
         if msg.correlation_id in self._in_flight:
             self.metrics.inc("task.duplicate_inflight")
+            self._ledger(msg, "deduplicated", ok=False, resolved=False, reason="duplicate in flight")
             await self._reject(msg, "duplicate_inflight", "task is already being processed")
             return
         self._in_flight.add(msg.correlation_id)
@@ -280,6 +314,7 @@ class BaseAgent:
         # -- least-privilege: only configured senders may task this agent --
         if self.spec.allowed_senders is not None and msg.sender not in self.spec.allowed_senders and "*" not in self.spec.allowed_senders:
             self.metrics.inc("task.sender_denied")
+            self._ledger(msg, "sender_denied", ok=False, resolved=False, reason="sender not permitted")
             await self._reject(msg, "sender_not_permitted", f"sender {msg.sender!r} is not permitted to task {self.id}")
             return
         # -- replay guard: a redelivery that already completed must not spend
@@ -290,6 +325,7 @@ class BaseAgent:
             cached = await self.store.get(key)
             if cached is not None:
                 self.metrics.inc("task.idempotent_hit")
+                self._ledger(msg, "idempotent_hit", ok=True, resolved=True)
                 await self._publish(msg.reply_with(TaskResult.model_validate(cached)))
                 await self.bus.ack(self.id, msg)
                 return
@@ -315,6 +351,7 @@ class BaseAgent:
             decision = await self._authorize(msg, spec)
         except Exception as exc:
             log("policy.error", error=repr(exc))
+            self._ledger(msg, "failed", ok=False, resolved=False, reason=exc)
             await self._reject(msg, "policy_error", f"policy evaluation failed: {exc}")
             return
         if decision is not None:
@@ -323,6 +360,7 @@ class BaseAgent:
             )
             if decision.decision is DecisionType.HOLD:
                 self.metrics.inc("policy.hold")
+                self._ledger(msg, "held", ok=False, resolved=False, reason="approval required")
                 await self._publish(
                     msg.reply_with(
                         Handoff(
@@ -340,12 +378,14 @@ class BaseAgent:
                 return
             if decision.decision is DecisionType.DENY:
                 self.metrics.inc("policy.denied")
+                self._ledger(msg, "denied", ok=False, resolved=False, reason="; ".join(decision.reasons))
                 await self._reject(msg, "policy_denied", "; ".join(decision.reasons))
                 return
             # Shadow mode: keep the real policy outcome, but stop before the
             # handler. No tool, target or external sink is touched.
             if self.settings.shadow_mode and decision.allowed:
                 self.metrics.inc("policy.shadow_blocked")
+                self._ledger(msg, "shadow_blocked", ok=True, resolved=True)
                 shadow_data = decision.model_dump(mode="json")
                 shadow_data.update(
                     {
@@ -383,13 +423,18 @@ class BaseAgent:
 
         started = time.perf_counter()
         self.metrics.inc("task.received")
+        self._ledger(msg, "received")
         log("task.start", actor=msg.sender, objective=spec.objective, attempt=msg.attempt)
         try:
             result = await asyncio.wait_for(
                 self.handle_task(spec, msg), timeout=self.settings.task_timeout_s
             )
-        except (asyncio.TimeoutError, TimeoutError):
+        except (asyncio.TimeoutError, TimeoutError) as exc:
             self.metrics.inc("task.timeout")
+            self._ledger(
+                msg, "timed_out", ok=False, resolved=False,
+                latency_ms=int((time.perf_counter() - started) * 1000), reason=exc,
+            )
             await self._reject(msg, ErrorCode.TIMEOUT, f"exceeded {self.settings.task_timeout_s}s")
             return
         except RetryableError as exc:
@@ -403,21 +448,29 @@ class BaseAgent:
                 if delay > 0:
                     await asyncio.sleep(delay)
                 self.metrics.inc("task.retried")
+                self._ledger(msg, "retried", reason=exc)
                 log("task.retry", reason=str(exc), attempt=msg.attempt + 1, backoff_s=delay)
                 await self.bus.nack(self.id, msg, requeue=True)
             else:
                 self.metrics.inc("task.failed")
+                self._ledger(msg, "failed", ok=False, resolved=False, reason=exc)
                 await self._reject(msg, ErrorCode.HANDLER, f"gave up after {msg.attempt + 1} attempts: {exc}")
             return
         except Exception as exc:
             self.metrics.inc("task.failed")
+            self._ledger(msg, "failed", ok=False, resolved=False, reason=exc)
             log("task.error", error=repr(exc))
             await self._reject(msg, ErrorCode.HANDLER, f"{type(exc).__name__}: {exc}")
             return
 
         if not isinstance(result, TaskResult):
             # A subsystem may answer with Handoff (needs a human) or Failure.
-            self.metrics.inc("task.handoff" if isinstance(result, Handoff) else "task.failed")
+            is_handoff = isinstance(result, Handoff)
+            self.metrics.inc("task.handoff" if is_handoff else "task.failed")
+            self._ledger(
+                msg, "handed_off" if is_handoff else "failed",
+                ok=False, resolved=False, reason="human handoff" if is_handoff else "handler failure",
+            )
             await self._publish(msg.reply_with(result))
             await self.bus.ack(self.id, msg)
             return
@@ -456,6 +509,14 @@ class BaseAgent:
         if key:
             await self.store.set(key, result.model_dump(mode="json"), ttl_s=3600)
         self.metrics.inc("task.completed")
+        self._ledger(
+            msg, "completed",
+            ok=result.ok,
+            resolved=result.ok,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            tokens=result.tokens_used,
+            reason=None if result.ok else (result.error or "handler returned ok=False"),
+        )
         log(
             "task.done",
             actor=msg.sender,

@@ -30,6 +30,28 @@ surface is visible and routable. See
                     peer-to-peer delegate() / ask()
 ```
 
+## Version 0.2.0 — task-aware, evidence-driven improvement
+
+`0.1.1` was a governed message bus with deterministic policy, HITL and an
+append-only evidence chain. `0.2.0` keeps that authority boundary unchanged and
+adds the two missing operational layers:
+
+| Capability | 0.1.1 | 0.2.0 |
+|---|---|---|
+| Task awareness | Counters plus a trace id; no per-task lifecycle state | Bounded, TTL-swept `TaskLedger` records received / retried / held / denied / shadow-blocked / failed / completed with attempt, latency, tokens and a redacted reason fingerprint. Public probes expose counts only; admin diagnostics expose the full redacted view. |
+| Improvement loop | Ad hoc audit → fix → verify | `agents benchmark` scores workflow variants against a fixed policy validator, re-evaluates only unresolved cases (adaptive focus), stops when the residual set is stable, and archives every round as signed OEKP/BENGAL evidence with lineage digests. |
+| Efficiency | Every regression run re-executed the whole suite | Adaptive benchmark re-runs only residual cases; `naive_evaluations`, `evaluations` and `evaluation_saving_pct` make the cost explicit. The shipped 5-case suite used 20 evaluations instead of 45 (55.6% saving) with the same validated winner. |
+| Promotion safety | CI plus human review | Benchmark reports are literal `rehearsal_only=True` / `shadow=True`, use a fresh in-memory approval store, never call a tool, bus, handler or live nonce, and reject any variant that emits `ALLOW`. |
+| Governance invariants | 9 coordinators, 93/24/22/12 role packs, exact shadow wording | Unchanged. No policy, approval, evidence, role or shadow-mode semantics were modified. |
+
+Run it with:
+
+```powershell
+python -m agents benchmark                       # offline, signed, no egress
+python -m agents benchmark --output exports/     # also write an oekp_bengal export
+python -m agents health                          # includes tasks_unresolved counts
+```
+
 ## Quickstart
 
 ```powershell
@@ -41,12 +63,13 @@ python -m agents storyboard --vertical finance   # 3-minute Money Shot storyboar
 python -m agents export --format oekp_bengal --output exports/  # compliance export
 python -m agents shadow          # observe-only: policy/HITL/evidence, NO execution or writes
 python -m agents demo            # one governed goal end to end
-python -m agents health          # SHELL health + diagnostics
+python -m agents health          # SHELL health + diagnostics + task counts
+python -m agents benchmark       # adaptive governance-readiness benchmark
 python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --vertical finance      # transaction gate + dual HITL
 python -m agents demo-fragmentation --vertical healthcare   # PII/PHI taint + signed egress
-python -m pytest -q              # 311 passed, 1 env-gated skip, no network
+python -m pytest -q              # 359 passed, 1 env-gated skip, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
@@ -73,7 +96,7 @@ the bridge is opt-in and its tests use an injected HTTP transport.
 
 | Time | Show | Point |
 |---|---|---|
-| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 311 passing with 1 symlink skip. |
+| 0:00–0:30 | `git log --oneline -3` and `python -m pytest -q` | Offline Ed25519 keys, multi-key trust bundle, approval-gated Atlassian bridge, and the four Starter Packs. Clean remote, 359 passing with 1 symlink skip. |
 | 0:30–1:00 | `SECURITY.md` rotation section and `ed25519_keys.json` | Verification tries the whole `kid → public_key` bundle, so rotation does not break in-flight waves or historical evidence. Missing active kid fails closed. |
 | 1:00–1:45 | ADR: <https://testing-bay.atlassian.net/wiki/spaces/SD/pages/786434/Decision+Ed25519+offline+KMS+signing+for+USOC+agent+mesh> | Decision record generated from the shipped work; KAN-2 is Done, page version 3. |
 | 1:45–2:20 | Jira project `KAN` | Four tracked follow-ups: three operational, one closed by the trust-bundle commit. |

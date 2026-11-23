@@ -30,6 +30,7 @@ from .runtime import SubsystemAgent
 from .security import SecurityError, Signer, build_signer, configured_approvers
 from .shell import Shell
 from .store import InMemoryStore, RedisStore, StateStore
+from .task_ledger import TaskLedger
 from .trust import (
     CoordinatorKeyring,
     build_approval_verifier,
@@ -133,6 +134,10 @@ class Mesh:
         self.fragmentation: FragmentationService | None = None
         self.fragmentation_error: str | None = None
         self.metrics = Metrics()
+        # Task awareness is process-local and observation-only, like Metrics.
+        # It is shared by the orchestrator and all nine agents so one trace can
+        # be followed from goal acceptance through every subsystem hop.
+        self.ledger = TaskLedger()
         self._started = False
 
     # -- lifecycle ----------------------------------------------------------
@@ -289,6 +294,7 @@ class Mesh:
                 self.settings,
                 self.metrics,
                 mission_id=self.settings.mission_id,
+                ledger=self.ledger,
             )
         known = set(self.registry.by_id)
         specs = list(self.registry.subsystems)
@@ -322,6 +328,7 @@ class Mesh:
                 policy=self.policy,
                 evidence=self.evidence,
                 approvals=self.approvals,
+                ledger=self.ledger,
             )
             for spec in specs
         }
@@ -333,6 +340,7 @@ class Mesh:
             self.approvals,
             fragmentation=self.fragmentation,
             fragmentation_error=self.fragmentation_error,
+            ledger=self.ledger,
         )
 
         if self.orchestrator is not None:
@@ -454,6 +462,7 @@ class Mesh:
             "role_profile": self.settings.role_profile,
             "profile_name": get_profile(self.settings.role_profile).name,
             "metrics": self.metrics.snapshot(),
+            "tasks": self.ledger.counts(),
             "bus": type(self.bus).__name__ if self.bus else None,
             "model": getattr(self.llm, "model", None),
             "message_auth": self.signer is not None,
