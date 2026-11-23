@@ -603,7 +603,8 @@ point:
    caches reads only; it never authorises a spend.
 7. `S3WormArchiveSink` ships redacted, HMAC-chained ledger segments to S3 Object
    Lock. Tenants have independent chains and key prefixes, and Object Lock plus
-   SSE makes the archive immutable at rest. Control-plane pods keep no approval,
+   SSE (AES256 by default, or `AGENT_ARCHIVE_SSE_KMS_KEY_ID` for SSE-KMS/CMEK)
+   makes the archive immutable at rest. Control-plane pods keep no approval,
    evidence or archive state on disk and can be autoscaled.
 
 A complete example is in `docker-compose.workers.example.yml`: one control

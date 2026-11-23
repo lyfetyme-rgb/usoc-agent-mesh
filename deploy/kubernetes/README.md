@@ -62,7 +62,7 @@ Operator or Secrets Store CSI so no usable Secret exists in Git or shell history
 
 ```powershell
 # 0. Build and push both images (with the optional drivers installed).
-docker build -t ghcr.io/<org>/usoc-mesh:0.2.0 .
+docker build -t ghcr.io/<org>/usoc-mesh:0.2.1 .
 docker build -f Dockerfile.dashboard -t ghcr.io/<org>/usoc-dashboard:0.2.0 .
 # Update the `image:` fields in 10-control-plane.yaml and 11-workers.yaml.
 
@@ -84,7 +84,9 @@ kubectl -n usoc-prod create secret generic usoc-mesh-secrets `
 #    approvers), image references.
 
 # 3. Apply in order. `kubectl apply -f deploy/kubernetes/` applies every *.yaml
-#    in the directory; the .example templates are deliberately excluded.
+#    in the directory, including the one-off doctor Job; the .example templates
+#    are deliberately excluded. Apply 12-doctor-job.yaml separately if you only
+#    want the preflight before a rollout.
 kubectl apply -f deploy/kubernetes/00-namespace.yaml
 kubectl apply -f deploy/kubernetes/02-configmap.yaml
 kubectl apply -f deploy/kubernetes/03-storage.yaml
@@ -132,6 +134,101 @@ Deployments if you need backlog-driven scaling. `scale-advice` defaults are 1–
 replicas and 8 pending messages per replica; align them with the HPA bounds
 before enabling both. The control-plane HPA has `minReplicas: 2` because the old
 single-writer constraint no longer exists.
+
+## Production rollout checklist (AWS / GCP / managed K8s)
+
+### 1. Cryptographic and secret prerequisites
+
+* Provision the HMAC trust root with at least 32 random bytes
+  (`python -c "import secrets; print(secrets.token_urlsafe(48))"`) or configure
+  Ed25519/KMS signing. Mount secrets read-only via Secrets Manager, GCP Secret
+  Manager, Vault or Secrets Store CSI; never inline them in a Deployment.
+* `AGENT_ENV=production` (set in `02-configmap.yaml`) makes HMAC pods exit
+  non-zero before the health port opens if `AGENT_SHARED_SECRET_FILE` is empty.
+  Verify with `kubectl -n usoc-prod logs <pod>` before any traffic is sent.
+  `AGENT_STRICT_PROD=1` is the stricter opt-in that also requires Ed25519 bus
+  keys and the signed approver registry.
+* Generate a **separate** `AGENT_HEALTH_TOKEN_FILE` for `usoc-mesh` and the
+  dashboard proxy, and a different `AGENT_ADMIN_TOKEN_FILE` for `/diagnostics`.
+  No token is ever passed to the browser or written into a frontend bundle.
+
+### 2. Storage and database hardening
+
+* **Partitions.** The schema currently creates `PARTITION BY LIST (tenant_id)`
+  partitions on `governance_approvals` and `task_ledger_events` on first use
+  (`ensure_partition`). For multi-million-tenant deployments, pre-create
+  `HASH (tenant_id)` partitions with `MODULUS 16` or `32` (or a managed
+  equivalent) as a migration, then keep the same tenant key. Never let a busy
+  control-plane pod perform DDL on the hot path at peak load.
+* **Connection pooling.** Put PgBouncer in transaction pooling mode or use RDS
+  Proxy. Budget `max_connections` as `sum(HPA maxReplicas) × pool_size` plus
+  admin reserve: the shipped HPAs cap the control plane at 8 and each worker at
+  20. Raising a cap to 120 without a proxy and a measured pool size will exhaust
+  Postgres connections. PG Bouncer must preserve `SELECT ... FOR UPDATE` and
+  advisory locks, which means **transaction** (not statement) pooling.
+* **Redis/Valkey.** Require TLS (`rediss://`), AUTH, multi-AZ failover and
+  `allkeys-lru` eviction. Redis holds only the bus and a short-lived approval
+  cache; Postgres remains authoritative, so evicting a key can never lose a
+  decision or double-spend a nonce.
+* **S3 Object Lock.** Enable Object Lock when the bucket is created (it cannot
+  be enabled retroactively), block all public access, and use SSE-KMS by
+  setting `AGENT_ARCHIVE_SSE_KMS_KEY_ID` (omit it for AES256). Grant the mesh
+  role only `s3:PutObject` and `s3:PutObjectRetention`, plus read permissions for
+  verification, and explicitly deny deletion and retention bypass:
+
+  ```json
+  {
+    "Effect": "Deny",
+    "Action": [
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+      "s3:BypassGovernanceRetention"
+    ],
+    "Resource": "arn:aws:s3:::REPLACE_ME_WORM_BUCKET/*"
+  }
+  ```
+
+  On GCP use bucket lock with CMEK and an equivalent deny policy. Retention is
+  `AGENT_ARCHIVE_RETENTION_DAYS` (default 2555) in `COMPLIANCE` mode.
+
+### 3. Pre-flight and progressive traffic ramp
+
+```powershell
+kubectl -n usoc-prod apply -f deploy/kubernetes/12-doctor-job.yaml
+kubectl -n usoc-prod logs -f job/usoc-doctor-preflight
+kubectl -n usoc-prod delete job/usoc-doctor-preflight
+```
+
+The Job checks Python/dependencies, the signed capability cards, persistent
+signing, Redis (`rediss://` + AUTH), a real Postgres `SELECT 1`, the signed
+approver registry when strict mode is on, and `head_bucket` on the WORM bucket.
+It runs with the same ConfigMap and secret file mounts as the pods and listens
+on no port.
+
+NetworkPolicy is default-deny egress with only DNS, Redis (6379), Postgres
+(5432) and S3 via VPC endpoint (443). There is deliberately **no** egress rule
+to `atlas/`, `h-lift/`, `gateway-cloud-functions/`, Atlassian or a model
+provider; verify with `kubectl -n usoc-prod get netpol` before ramping. Then ramp
+traffic 1% → 10% → 50% → 100%, watching:
+
+```powershell
+kubectl -n usoc-prod get hpa -w
+kubectl -n usoc-prod exec deploy/usoc-mesh -- python -m agents probe --url http://127.0.0.1:8080/ready
+```
+
+On the database side watch `pg_stat_activity.wait_event_type = 'Lock'` and
+lock wait time; on AWS watch S3 `PutObject` latency and 5xx rates. A rise in
+`failed_writes` in the WORM snapshot means uploads are retrying, not that tasks
+are failing.
+
+### 4. Load tests
+
+The service exposes only `/health`, `/ready` and admin-gated `/diagnostics`;
+there is no `/v1/tasks/dispatch` or browser-writable work API. Use the scripts
+in [`tests/loadtest/`](../../tests/loadtest/README.md): a k6 probe for the real
+HTTP surface and an async Python harness that drives the actual Postgres
+approval store for 10,000 tenant partitions and same-tenant nonce contention.
+Never point synthetic load at the admin diagnostics route.
 
 ## Hardening follow-ups (not enabled by default)
 

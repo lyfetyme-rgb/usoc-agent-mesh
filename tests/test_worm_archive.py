@@ -168,3 +168,26 @@ async def test_new_emits_during_failed_flush_keep_chain_contiguous():
     assert archive.pending == 0
     assert archive.verify() is True
 
+
+async def test_sse_kms_key_is_forwarded_to_object_storage():
+    client = FakeS3()
+    key_id = "arn:aws:kms:us-east-1:123456789012:key/usoc-evidence"
+    archive = sink(client, sse_kms_key_id=key_id)
+    archive.emit(event(1))
+    await archive.flush()
+
+    assert client.calls[0]["ServerSideEncryption"] == "aws:kms"
+    assert client.calls[0]["SSEKMSKeyId"] == key_id
+    assert "SSEKMSKeyId" not in sink(FakeS3()).snapshot()
+    assert archive.snapshot()["sse"] == "aws:kms"
+    assert archive.verify() is True
+
+
+def test_empty_sse_kms_key_is_rejected():
+    try:
+        sink(FakeS3(), sse_kms_key_id="   ")
+    except ValueError as exc:
+        assert "sse_kms_key_id" in str(exc)
+    else:
+        raise AssertionError("an empty KMS key id was accepted")
+

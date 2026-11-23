@@ -403,11 +403,13 @@ injected HTTP transport, so no live Atlassian writes occur in CI.
 * With the memory bus the signing secret is ephemeral per process. Set
   `AGENT_SHARED_SECRET` if `agents approve` must verify approvals written by a
   different process; with Redis an explicit secret is mandatory.
-* Outside local dev (Redis bus, Postgres/DSN, S3 archive or
-  `AGENT_REQUIRE_PERSISTENT_SIGNING_KEY=1`), HMAC mode fails startup without
-  `AGENT_SHARED_SECRET` or `AGENT_SHARED_SECRET_FILE`. An ephemeral per-process
-  key would make another replica unable to verify approvals and evidence.
-  Ed25519/KMS modes are exempt because their keys are already persistent.
+* Outside local dev (Redis bus, Postgres/DSN, S3 archive, `AGENT_ENV=production`
+  or `AGENT_REQUIRE_PERSISTENT_SIGNING_KEY=1`), HMAC mode fails startup without
+  `AGENT_SHARED_SECRET` or `AGENT_SHARED_SECRET_FILE`. The process exits before
+  the health port opens, so an empty key can never accept traffic. An ephemeral
+  per-process key would make another replica unable to verify approvals and
+  evidence. Ed25519/KMS modes are exempt because their keys are already
+  persistent.
 * `redact_text` and `redact_fields` strip bearer/Basic tokens, URL credentials
   and query-string secrets from structured logs.
 * `python -m agents doctor` prints Redis URLs with the password masked.
@@ -457,9 +459,10 @@ ledger archive to S3 Object Lock:
   are attributed to their originating tenant and ordered by a DB-assigned
   sequence.
 * `AGENT_ARCHIVE_BACKEND=s3` streams redacted, HMAC-chained segments to S3 with
-  `ObjectLockMode`/`ObjectLockRetainUntilDate` and AES256 SSE. Each tenant has an
-  independent chain and key prefix; a missing, reordered or edited segment fails
-  verification.
+  `ObjectLockMode`/`ObjectLockRetainUntilDate`. Encryption is AES256 by default;
+  set `AGENT_ARCHIVE_SSE_KMS_KEY_ID` for a customer-managed KMS/CMEK key. Each
+  tenant has an independent chain and key prefix; a missing, reordered or edited
+  segment fails verification.
 
 Require a dedicated `AGENT_ARCHIVE_SECRET_FILE` in Ed25519/KMS clusters; HMAC
 clusters may reuse the shared secret. The archive is observation-only: write
@@ -959,13 +962,18 @@ docker compose --env-file .env.docker down
 - [ ] `AGENT_APPROVAL_BACKEND`, `AGENT_EVIDENCE_BACKEND` and
       `AGENT_LEDGER_BACKEND` are `postgres`; `AGENT_POSTGRES_DSN` is a managed,
       private TLS DSN and its database is backed up.
-- [ ] `AGENT_ARCHIVE_BACKEND=s3`; the bucket has Object Lock enabled, SSE is on,
-      and retention matches the compliance policy.
+- [ ] `AGENT_ENV=production` (or `AGENT_REQUIRE_PERSISTENT_SIGNING_KEY=1`); a pod
+      with an empty HMAC secret has been observed to exit before opening the port.
+- [ ] `AGENT_ARCHIVE_BACKEND=s3`; Object Lock was enabled at bucket creation,
+      SSE is on (AES256 or `AGENT_ARCHIVE_SSE_KMS_KEY_ID`), public access is
+      blocked, and the mesh role can only PutObject/PutObjectRetention with an
+      explicit deny on DeleteObject and BypassGovernanceRetention.
 - [ ] `AGENT_ARCHIVE_SECRET_FILE` (or a persistent shared secret in HMAC mode) is
       mounted read-only and distinct from the health/admin tokens.
 - [ ] Control-plane replicas are stateless: no `/data` volume, no local approval
       file, no local OEKP chain, and HPA is enabled.
-- [ ] Redis is private, or TLS is enabled and the URL uses `rediss://`.
+- [ ] Redis uses `rediss://`, AUTH and multi-AZ failover with `allkeys-lru`; the
+      URL is injected only as a mounted/secret value, never into a browser bundle.
 - [ ] Logs are shipped somewhere tamper-resistant; `AGENT_LOG_JSON=true`.
 - [ ] `python -m agents doctor` passes in the deployed environment.
 - [ ] Approvals and evidence are tested end to end after any secret change.

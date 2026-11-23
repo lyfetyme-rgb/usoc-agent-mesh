@@ -9,6 +9,9 @@ metadata:
   labels:
     app.kubernetes.io/part-of: usoc-mesh
 data:
+  # Deployment hint: HMAC clusters fail startup without a mounted persistent
+  # signing key. AGENT_STRICT_PROD remains the opt-in full Ed25519 mode.
+  AGENT_ENV: "production"
   AGENT_BUS: "redis"
   AGENT_HEALTH_HOST: "0.0.0.0"
   AGENT_LOG_JSON: "true"
@@ -31,6 +34,8 @@ data:
   AGENT_ARCHIVE_REGION: "REPLACE_ME_AWS_REGION"
   AGENT_ARCHIVE_LOCK_MODE: "COMPLIANCE"
   AGENT_ARCHIVE_RETENTION_DAYS: "2555"
+  # Uncomment when the bucket requires SSE-KMS. Empty/omitted uses AES256.
+  # AGENT_ARCHIVE_SSE_KMS_KEY_ID: "arn:aws:kms:us-east-1:123456789012:key/usoc-evidence"
   # /tmp is the only writable path in the read-only-rootfs pods. No /data mount.
   AGENT_WORKSPACE: "/tmp/usoc-workspace"
   AGENT_SUBSYSTEMS_FILE: "/app/subsystems.yaml"

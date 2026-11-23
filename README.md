@@ -862,6 +862,15 @@ single-writer control-plane pod. Install the drivers with
 `pip install -e '.[postgres,s3,redis]'`. An Atlassian egress proxy and a Helm
 chart remain out of scope.
 
+`AGENT_ENV=production` makes HMAC clusters fail startup without a persistent
+shared signing key before the health port opens; `AGENT_STRICT_PROD=1` remains
+the opt-in full Ed25519/registry mode. The one-off `usoc-doctor-preflight` Job
+verifies Postgres, Redis and WORM connectivity and credentials before traffic is
+ramped. The HTTP surface is still read-only: `/health`, `/ready` and
+admin-only `/diagnostics`. Load tests for that surface and for tenant/nonce
+contention live in [`tests/loadtest/`](tests/loadtest/README.md); no dispatch
+endpoint is exposed to browsers or k6.
+
 To use the fragmentation layer in the container, copy `connectors.example.yaml`
 to `connectors.yaml`, review the mappings, uncomment the two read-only mounts in
 `docker-compose.yml`, and set `AGENT_CONNECTORS_FILE=/app/connectors.yaml`.

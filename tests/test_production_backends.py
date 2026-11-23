@@ -37,7 +37,8 @@ def production_settings(**overrides) -> Settings:
 
 
 async def test_mesh_composes_transactional_and_worm_backends():
-    mesh = Mesh(settings=production_settings())
+    kms_key = "arn:aws:kms:us-east-1:123456789012:key/usoc-evidence"
+    mesh = Mesh(settings=production_settings(archive_sse_kms_key_id=kms_key))
     await mesh.start()
     try:
         assert isinstance(mesh.approvals, PostgresApprovalStore)
@@ -46,6 +47,7 @@ async def test_mesh_composes_transactional_and_worm_backends():
         assert any(isinstance(t, PostgresLedgerSink) for t in mesh.ledger.sink.sinks)
         assert isinstance(mesh.ledger.archive, S3WormArchiveSink)
         assert mesh.ledger.archive.bucket == "usoc-evidence"
+        assert mesh.ledger.archive.sse_kms_key_id == kms_key
         assert isinstance(mesh.evidence, PostgresEvidenceChain)
         assert not (mesh._workspace / "approvals.json").exists()
         assert not (mesh._workspace / "evidence" / "chain.jsonl").exists()

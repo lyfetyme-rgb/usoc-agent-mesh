@@ -581,11 +581,52 @@ def test_doctor_passes_with_full_production_trust(tmp_path, monkeypatch, capsys)
     )
     assert validate_strict_prod(settings) == []
     monkeypatch.setattr(cli, "_settings", lambda args: settings)
+    # Preflight helpers perform real network I/O in the deployed Job; tests
+    # replace them so the config contract can be verified offline.
+    async def reachable(_value):
+        return True
+
+    monkeypatch.setattr(cli, "_postgres_reachable", reachable)
+    monkeypatch.setattr(cli, "_worm_bucket_reachable", reachable)
     args = cli.build_parser().parse_args(["doctor"])
     assert cli.cmd_doctor(args) == 0
     out = capsys.readouterr().out
     assert "per-coordinator Ed25519" in out
     assert "signed approvers" in out
+    assert "postgres reachable" in out
+    assert "worm bucket reachable" in out
+
+
+def test_doctor_reports_unreachable_production_backends(tmp_path, monkeypatch, capsys):
+    settings = _settings(
+        tmp_path,
+        bus="redis",
+        redis_url="rediss://user:secret@redis.internal:6379/0",
+        postgres_dsn="postgresql://user:secret@postgres.internal:5432/usoc",
+        archive_backend="s3",
+        archive_bucket="usoc-evidence",
+        archive_sse_kms_key_id="arn:aws:kms:us-east-1:1:key/usoc",
+        shared_secret="persistent-cluster-key-with-at-least-32-chars",
+    )
+
+    async def ping():
+        return True
+
+    async def unreachable(_value):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(cli, "_settings", lambda args: settings)
+    monkeypatch.setattr(cli, "_redis_reachable", ping)
+    monkeypatch.setattr(cli, "_postgres_reachable", unreachable)
+    monkeypatch.setattr(cli, "_worm_bucket_reachable", unreachable)
+    args = cli.build_parser().parse_args(["doctor"])
+    assert cli.cmd_doctor(args) == 1
+    out = capsys.readouterr().out
+    assert "postgres reachable" in out
+    assert "worm bucket reachable" in out
+    assert "connection refused" in out
+    assert "secret" not in out
+    assert "user:secret" not in out
 
 
 def test_cli_approval_logs_verification_to_oekp(tmp_path, monkeypatch):

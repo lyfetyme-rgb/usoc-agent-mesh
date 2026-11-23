@@ -259,6 +259,7 @@ class Mesh:
                     endpoint_url=self.settings.archive_endpoint_url,
                     retention_days=self.settings.archive_retention_days,
                     lock_mode=self.settings.archive_lock_mode,
+                    sse_kms_key_id=self.settings.archive_sse_kms_key_id,
                 )
             elif self.settings.ledger_archive_path is not None:
                 self.ledger.archive = SignedArchiveSink(

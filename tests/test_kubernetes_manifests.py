@@ -37,7 +37,7 @@ def by_kind(kind: str) -> list[dict]:
 def pod_specs() -> list[tuple[str, dict, dict]]:
     """(source, pod spec, container) for every container in a workload."""
     out: list[tuple[str, dict, dict]] = []
-    for doc in by_kind("Deployment"):
+    for doc in by_kind("Deployment") + by_kind("Job"):
         spec = doc["spec"]["template"]["spec"]
         for container in spec["containers"]:
             out.append((doc["_source"], spec, container))
@@ -51,6 +51,7 @@ def test_manifest_set_is_parseable_and_scoped_to_one_namespace():
         "03-storage.yaml",
         "10-control-plane.yaml",
         "11-workers.yaml",
+        "12-doctor-job.yaml",
         "20-network-policies.yaml",
         "30-dashboard-proxy.yaml",
     }
@@ -135,8 +136,10 @@ def test_tokens_are_mounted_files_and_never_inline_env_values():
 
 def test_probes_use_the_secret_aware_cli_and_no_bearer_literal():
     for source, _spec, container in pod_specs():
-        if not container["image"].endswith("usoc-mesh:0.2.0"):
+        if not container["image"].endswith("usoc-mesh:0.2.1"):
             continue
+        if "livenessProbe" not in container:
+            continue  # the one-off preflight Job has no listener to probe
         for key in ("livenessProbe", "readinessProbe"):
             command = container[key]["exec"]["command"]
             assert "agents" in command and "probe" in command, (source, key)
@@ -163,6 +166,26 @@ def test_control_plane_is_stateless_and_scales_with_workers():
     assert env["AGENT_ARCHIVE_SECRET_FILE"]["value"].startswith("/run/secrets/")
 
 
+def test_preflight_job_runs_doctor_with_the_same_trust_inputs():
+    jobs = [doc for doc in by_kind("Job") if doc["metadata"]["name"] == "usoc-doctor-preflight"]
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job["spec"]["backoffLimit"] == 0
+    pod = job["spec"]["template"]["spec"]
+    assert pod["restartPolicy"] == "Never"
+    container = pod["containers"][0]
+    assert "doctor" in container["command"]
+    assert any(item.get("configMapRef", {}).get("name") == "usoc-mesh-config"
+               for item in container.get("envFrom", []))
+    env = {item["name"] for item in container.get("env", [])}
+    assert {
+        "AGENT_REDIS_URL",
+        "AGENT_POSTGRES_DSN",
+        "AGENT_SHARED_SECRET_FILE",
+        "AGENT_ARCHIVE_SECRET_FILE",
+    } <= env
+
+
 def test_network_policies_deny_by_default_and_allow_no_wildcard_egress():
     policies = {doc["metadata"]["name"]: doc for doc in by_kind("NetworkPolicy")}
     assert "default-deny-ingress" in policies
@@ -187,6 +210,8 @@ def test_shared_config_uses_real_settings_and_no_secret_values():
     assert len(config) == 1
     data = config[0]["data"]
     assert data["AGENT_BUS"] == "redis"
+    # Production hint: HMAC pods fail startup without a mounted persistent key.
+    assert data["AGENT_ENV"] == "production"
     assert data["AGENT_WORKSPACE"] == "/tmp/usoc-workspace"
     assert data["AGENT_REQUIRE_APPROVER_ALLOWLIST"] == "true"
     for key, value in {
