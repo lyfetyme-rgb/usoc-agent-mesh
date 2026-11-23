@@ -38,6 +38,7 @@ class Shell:
         fragmentation: Any = None,
         fragmentation_error: str | None = None,
         ledger: Any = None,
+        bengal_status: dict[str, Any] | None = None,
     ) -> None:
         self.registry = registry
         self.agents = agents
@@ -47,6 +48,8 @@ class Shell:
         self.fragmentation = fragmentation
         self.fragmentation_error = fragmentation_error
         self.ledger = ledger
+        # Static BENGAL capability metadata only: no case data or fingerprints.
+        self.bengal_status: dict[str, Any] = bengal_status or {"enabled": False}
 
     def _fragmentation_status(self) -> dict[str, Any]:
         status: dict[str, Any] = {
@@ -122,6 +125,7 @@ class Shell:
                 "message_auth": getattr(self.bus, "signer", None) is not None,
                 "pending_approvals": pending,
                 "tasks": self.ledger.counts() if self.ledger is not None else {},
+                "bengal": self.bengal_status,
             }
         return redact_fields(
             {
@@ -145,6 +149,7 @@ class Shell:
                 "pending_approvals": pending,
                 "message_auth": getattr(self.bus, "signer", None) is not None,
                 "fragmentation": self._fragmentation_status(),
+                "bengal": self.bengal_status,
             }
         )
 

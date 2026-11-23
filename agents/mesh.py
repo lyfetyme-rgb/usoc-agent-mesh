@@ -10,21 +10,27 @@ is what makes the tests fast and the demo runnable without Redis or an API key.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
+from .bengal import BengalEngine, BengalThresholds, ThreatMode
 from .bus import Bus, acls_from_specs, build_bus, topic_rules_from_authority
 from .config import Settings, get_settings
 from .connectors import IngestResult, load_connectors
 from .contracts import GoalResult
 from .correlation import CorrelationResult
+from .durable import RedisLedgerSink, SignedArchiveSink
 from .evidence import EvidenceChain
 from .fragmentation import FragmentationReport, FragmentationService
+from .ingress import IngressGate, gate_from_settings
 from .governance import ApprovalStore, FileApprovalStore, PolicyConfig, PolicyEngine
 from .llm import EchoLLM, LLM, build_llm
 from .observability import Metrics, configure_logging, log
 from .orchestrator import LLMPlanner, Orchestrator, Planner, RouterPlanner
 from .profiles import apply_role_profile, get_profile, settings_for_profile
+from .resilience import BreakerRegistry, IdempotencyConflict, IdempotencyRegistry
 from .registry import Registry, SubsystemSpec, load_registry
 from .runtime import SubsystemAgent
 from .security import SecurityError, Signer, build_signer, configured_approvers
@@ -86,6 +92,12 @@ class Mesh:
         workspace_subdir: str = "",
         agents: list[str] | None = None,
         run_orchestrator: bool = True,
+        ledger_sink: Any | None = None,
+        ledger_archive: Any | None = None,
+        ingress: IngressGate | None = None,
+        idempotency: IdempotencyRegistry | None = None,
+        breakers: BreakerRegistry | None = None,
+        bengal_engine: BengalEngine | None = None,
     ) -> None:
         self.settings = settings_for_profile(settings or get_settings())
         self._registry_path = Path(registry_path or self.settings.subsystems_file)
@@ -95,6 +107,12 @@ class Mesh:
         self._planner_override = planner
         self._approvals_override = approvals
         self._fragmentation_override = fragmentation
+        self._ledger_sink_override = ledger_sink
+        self._ledger_archive_override = ledger_archive
+        self._ingress_override = ingress
+        self._idempotency_override = idempotency
+        self._breakers_override = breakers
+        self._bengal_override = bengal_engine
         # Shadow runs get their own workspace so approvals, evidence and publish
         # state can never be confused with live state. CLI callers that already
         # point at a .../shadow workspace are not double-nested.
@@ -134,15 +152,62 @@ class Mesh:
         self.fragmentation: FragmentationService | None = None
         self.fragmentation_error: str | None = None
         self.metrics = Metrics()
+        # Resilience and edge controls are composed here so every entry point
+        # (CLI, HTTP health worker, bus consumer) inherits the same policy.
+        self.ingress: IngressGate | None = None
+        self.idempotency: IdempotencyRegistry | None = None
+        self.breakers: BreakerRegistry | None = None
+        # BENGAL BAA analyzers are LLM-free in the governed path. The optional
+        # engine override can carry an LLM for offline perspective research.
+        self.bengal = self._bengal_override or BengalEngine(
+            secret=self.settings.shared_secret or "",
+            thresholds=BengalThresholds(
+                grounded_min=self.settings.bengal_grounded_min,
+                plausible_min=self.settings.bengal_plausible_min,
+                min_independent_sources=self.settings.bengal_min_independent_sources,
+                corroboration_min=self.settings.bengal_corroboration_min,
+                k_anonymity=self.settings.bengal_k_anonymity,
+                review_at=self.settings.bengal_review_at,
+                block_at=self.settings.bengal_block_at,
+            ),
+        )
         # Task awareness is process-local and observation-only, like Metrics.
         # It is shared by the orchestrator and all nine agents so one trace can
-        # be followed from goal acceptance through every subsystem hop.
-        self.ledger = TaskLedger()
+        # be followed from goal acceptance through every subsystem hop. Durable
+        # sinks are mirrors only: they never change an execution decision.
+        self.ledger = TaskLedger(
+            sink=self._ledger_sink_override,
+            archive=self._ledger_archive_override,
+        )
         self._started = False
 
     # -- lifecycle ----------------------------------------------------------
     async def start(self) -> "Mesh":
         configure_logging(self.settings.log_level, self.settings.log_json)
+
+        # Edge controls. Injectable for tests; otherwise derived from settings.
+        self.ingress = self._ingress_override or gate_from_settings(self.settings)
+        self.idempotency = self._idempotency_override or IdempotencyRegistry(
+            ttl_s=self.settings.idempotency_ttl_s
+        )
+        self.breakers = self._breakers_override or BreakerRegistry(
+            failure_threshold=self.settings.circuit_failure_threshold,
+            reset_timeout_s=self.settings.circuit_reset_s,
+        )
+        # Durable mirrors. Injected sinks always win. A dead Redis only counts a
+        # failed write (see RedisLedgerSink) so telemetry can never fail a task.
+        if self.ledger.sink is None and self.settings.ledger_backend == "redis":
+            self.ledger.sink = RedisLedgerSink(
+                url=self.settings.redis_url,
+                socket_timeout_s=self.settings.redis_socket_timeout_s,
+                hot_ttl_s=self.settings.ledger_hot_ttl_s,
+            )
+        if self.ledger.archive is None and self.settings.ledger_archive_path is not None:
+            self.ledger.archive = SignedArchiveSink(
+                path=self.settings.ledger_archive_path,
+                secret=self.settings.shared_secret or "usoc-local-archive",
+            )
+
         self.message_authority = build_message_authority(self.settings)
         if isinstance(self.message_authority, CoordinatorKeyring):
             # Bus keys are per-coordinator; evidence, approvals and ADRs keep
@@ -329,6 +394,7 @@ class Mesh:
                 evidence=self.evidence,
                 approvals=self.approvals,
                 ledger=self.ledger,
+                bengal_engine=self.bengal,
             )
             for spec in specs
         }
@@ -341,6 +407,12 @@ class Mesh:
             fragmentation=self.fragmentation,
             fragmentation_error=self.fragmentation_error,
             ledger=self.ledger,
+            bengal_status={
+                "enabled": True,
+                "method_version": "bengal-baa/v1",
+                "protocol_version": "bengal-eval/v1",
+                "modes": [m.value for m in ThreatMode],
+            },
         )
 
         if self.orchestrator is not None:
@@ -383,6 +455,8 @@ class Mesh:
                     await closable.close()
                 except Exception:
                     pass
+        # Drain hot/cold mirrors last so the final transition is not lost.
+        await self.ledger.flush()
         self._started = False
         log("mesh.stopped")
 
@@ -393,7 +467,22 @@ class Mesh:
         await self.stop()
 
     # -- work ---------------------------------------------------------------
-    async def run(self, goal: str, mission_id: str | None = None) -> GoalResult:
+    async def run(
+        self,
+        goal: str,
+        mission_id: str | None = None,
+        *,
+        tenant_id: str = "default",
+        idempotency_key: str | None = None,
+    ) -> GoalResult:
+        """Run one governed goal, replaying a prior identical request if present.
+
+        Ingress validates and redacts before anything else sees the goal. The
+        tenant-scoped idempotency token is the *only* identity used for replay:
+        a retry from the same tenant returns the cached result without spending
+        a second set of approvals or model tokens. A failed goal releases its
+        claim so it stays retryable.
+        """
         if not self._started:
             await self.start()
         if self.orchestrator is None:
@@ -401,9 +490,87 @@ class Mesh:
                 "this mesh is running in worker mode (no orchestrator); "
                 "run `agents serve` on the control plane"
             )
+        assert self.ingress is not None and self.idempotency is not None
+
+        ingest = self.ingress.accept_goal(
+            goal, tenant_id=tenant_id, idempotency_key=idempotency_key
+        )
+        if ingest.quarantined:
+            # The quarantine kept only a fingerprint; nothing downstream sees
+            # the raw value. Callers get a safe, non-sensitive error code.
+            raise ValueError(f"{ingest.code}: goal rejected by ingress")
+
+        key, tenant, digest = ingest.idempotency_key, ingest.tenant_id, ingest.digest
+        claim = await self.idempotency.claim(key, digest=digest)
+        if claim.state == "completed":
+            cached = await self.store.get(f"goal:{key}") if self.store else None
+            if cached is not None:
+                self.metrics.inc("goal.idempotent_hit")
+                self.ledger.record(
+                    agent_id="mesh",
+                    state="idempotent_hit",
+                    correlation_id=key[:16],
+                    tenant_id=tenant,
+                    ok=True,
+                    resolved=True,
+                )
+                return GoalResult.model_validate(cached)
+
         if mission_id:
             self.orchestrator.mission_id = mission_id
-        return await self.orchestrator.run(goal)
+        try:
+            result = await self.orchestrator.run(
+                ingest.goal, idempotency_key=key, tenant_id=tenant
+            )
+        except BaseException:
+            await self.idempotency.release(key)
+            self.ledger.record(
+                agent_id="mesh",
+                state="goal_error",
+                correlation_id=key[:16],
+                tenant_id=tenant,
+                ok=False,
+                resolved=True,
+            )
+            raise
+
+        if result.ok:
+            await self.idempotency.complete(key, digest=digest)
+            if self.store is not None:
+                await self.store.set(
+                    f"goal:{key}",
+                    result.model_dump(mode="json"),
+                    ttl_s=self.settings.idempotency_ttl_s,
+                )
+            state = "goal_completed"
+        else:
+            await self.idempotency.release(key)
+            state = "goal_failed"
+        self.ledger.record(
+            agent_id="mesh",
+            state=state,
+            correlation_id=result.correlation_id or key[:16],
+            tenant_id=tenant,
+            ok=result.ok,
+            resolved=True,
+        )
+        return result
+
+    async def analyze_bengal(self, case: Any, *, modes: Any = None) -> Any:
+        """Run the BENGAL BAA analyzers and record a redacted lineage event."""
+        if not self._started:
+            await self.start()
+        report = await self.bengal.analyze(case, modes=modes)
+        self.metrics.inc("bengal.analysis")
+        self.ledger.record(
+            agent_id="bengal",
+            state="bengal_analyzed",
+            correlation_id=case.case_id,
+            tenant_id=case.tenant_id,
+            ok=True,
+            resolved=True,
+        )
+        return report
 
     # -- fragmentation ------------------------------------------------------
     async def ingest(self) -> IngestResult:
@@ -463,6 +630,16 @@ class Mesh:
             "profile_name": get_profile(self.settings.role_profile).name,
             "metrics": self.metrics.snapshot(),
             "tasks": self.ledger.counts(),
+            "quarantined": (
+                self.ingress.quarantine.snapshot()["quarantined"] if self.ingress else 0
+            ),
+            "ingress": self.ingress.quarantine.snapshot() if self.ingress else None,
+            "idempotency": self.idempotency.snapshot() if self.idempotency else None,
+            "breakers": self.breakers.snapshot() if self.breakers else None,
+            "bengal": {
+                "method_version": "bengal-baa/v1",
+                "modes": [m.value for m in ThreatMode],
+            },
             "bus": type(self.bus).__name__ if self.bus else None,
             "model": getattr(self.llm, "model", None),
             "message_auth": self.signer is not None,

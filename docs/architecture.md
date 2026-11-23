@@ -67,10 +67,10 @@ of them as agents; the planner selects the subset a goal needs.
 | 4 Security analysis | CYBER DEFENSE | implemented, defensive-only screen |
 | 5 Risk and policy evaluation | SERAPHIM + PolicyEngine | deterministic / no LLM, implemented |
 | 6 Simulation | CSSSF | LLM-backed coordinator, sandboxed tool scope |
-| 7 Independent assurance | BENGAL | deterministic / no LLM evidence verification |
+| 7 Independent assurance | BENGAL | deterministic / no LLM evidence verification + BAA threat-mode analysis |
 | 8 Human authorization | HITL + ApprovalStore | deterministic / no LLM, file-backed |
 | 9 Controlled execution | runtime + target allowlist | implemented, bounded |
-| 10 Independent validation | BENGAL | evidence chain verification |
+| 10 Independent validation | BENGAL | evidence chain verification + redacted BAA assessments |
 | 11 Evidence preservation | OEKP + EvidenceChain | deterministic / no LLM, append-only, hash-chained |
 | 12 Controlled improvement | AICEE | proposal-only path |
 
@@ -476,6 +476,48 @@ method but never the definition of success:
 * **Proposal only** — the report is permanently `rehearsal_only` / `shadow`,
   uses an isolated in-memory approval store, and never promotes a variant. A
   human still owns the merge decision.
+
+## 9b. BENGAL BAA threat-mode analysis (IARPA BAA-24-03)
+
+`agents/bengal.py` turns BENGAL from an evidence-chain verifier into a real,
+model-agnostic LLM-threat-mode analyzer while keeping every governed path
+deterministic. Four analyzers cover the targeted topic areas:
+
+| Topic | Analyzer | Redacted output |
+|---|---|---|
+| Bias / diverse perspectives | lexicon signals + perspective vectors; optional injected LLM induces perspectives and simulated dialogue | bias score, diversity score, pairwise similarity, perspective shift, indicator counts and 16-hex fingerprints |
+| Hallucination / inference / confidence | trusted-corpus overlap with an explicit plausible-inference allowance and unsupported-specificity check | per-claim status, support, hallucination/inference rates, confidence with its coverage/margin basis |
+| Safe information flow | verifiable redaction, small-cell aggregation detection, sensitive-access likelihood | HMAC sanitization manifest (categories + digests only), group fingerprints, access verdict |
+| Poisoned / imperfect sources | provenance, historical accuracy, intent and corroboration across independent roots | source reliability factors, intent, corroboration verdicts, reliable-intel fingerprints |
+
+Design invariants:
+
+* **Observation only.** BENGAL never approves, denies or executes an action.
+  Reports are consumed by policy/HITL/egress controls, not substituted for them.
+* **No raw payloads.** Reports carry opaque case ids, 16-hex fingerprints,
+  counts and scores only — safe for the task ledger, OEKP and public health.
+* **Model agnostic.** Lexical/statistical paths are deterministic and offline.
+  An injected `agents.llm.LLM` enriches perspective induction without changing
+  the scoring contract or the governance boundary. The governed BENGAL
+  coordinator stays `model_tier: deterministic` (no LLM call).
+* **Scoped opt-in.** `BengalAgent.handle_task` keeps evidence verification as
+  its default; BAA analysis runs only when `inputs.bengal_analyze` is present.
+
+`agents/bengal_eval.py` implements a replicable T&E protocol: a fixed labeled
+JSONL corpus (`fixtures/bengal/cases.jsonl`), the fixed analyzer, and per-mode
+confusion counts (TP/FP/FN/TN), precision, recall, F1, accuracy, tie-aware
+rank ROC/AUC and Wilson 95% confidence bounds, macro-averaged across modes.
+Results contain no raw text. Run it with `python -m agents bengal-eval` (acceptance
+threshold via `--min-f1`); analyze a single case with
+`python -m agents bengal-analyze case.json`. The offline corpus is calibrated to
+the analyzer's documented rules, so its scores are reproducible, not an estimate
+of real-world generalization; widen and re-label the corpus before trusting it
+as an operational capability baseline.
+
+The dashboard shows only static capability metadata (method/protocol version,
+mode count) from the public health payload; T&E thresholds and the eval corpus
+path are visible only on the admin-gated diagnostics route. No case data is
+ever published to either surface.
 
 ## 10. Security boundaries
 
