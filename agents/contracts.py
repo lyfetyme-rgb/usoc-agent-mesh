@@ -121,6 +121,9 @@ class Query(Strict):
     kind: Literal["query"] = "query"
     question: str = Field(min_length=1, max_length=8_000)
     context: dict[str, Any] = Field(default_factory=dict)
+    # Optional tenant scope for governance queries (e.g. HITL pending queues).
+    # Absent means the default partition, never "all tenants".
+    tenant_id: str | None = Field(default=None, max_length=200)
 
 
 class QueryReply(Strict):

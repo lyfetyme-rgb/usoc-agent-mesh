@@ -1,6 +1,7 @@
 # Zero-trust perimeter. Requires a NetworkPolicy-capable CNI (Calico/Cilium/
-# AWS VPC CNI with NP support). Managed Redis is outside the cluster, so its
-# CIDR is an explicit placeholder -- replace 10.0.0.0/8 with your real endpoint.
+# AWS VPC CNI with NP support). Managed Redis, PostgreSQL and the S3 VPC endpoint
+# are outside the cluster, so their CIDRs are explicit placeholders -- replace
+# 10.0.0.0/8 with your real network ranges.
 #
 # Deliberately NOT allowed: direct egress to gateway-cloud-functions, h-lift,
 # Atlassian or any model provider. USOC's Atlassian bridge is opt-in and
@@ -108,12 +109,26 @@ spec:
   policyTypes:
     - Egress
   egress:
+    # Replace 10.0.0.0/8 with the real CIDRs for your managed Redis, Postgres
+    # and S3 VPC endpoint. Only these three destinations are reachable.
     - to:
         - ipBlock:
-            cidr: 10.0.0.0/8 # REPLACE with the managed Redis/Valkey CIDR
+            cidr: 10.0.0.0/8
       ports:
         - protocol: TCP
-          port: 6379
+          port: 6379 # Redis/Valkey (TLS)
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 5432 # managed PostgreSQL
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443 # S3 Object Lock via VPC endpoint
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -127,12 +142,25 @@ spec:
   policyTypes:
     - Egress
   egress:
+    # Workers use the same transactional backends as the control plane.
     - to:
         - ipBlock:
-            cidr: 10.0.0.0/8 # REPLACE with the managed Redis/Valkey CIDR
+            cidr: 10.0.0.0/8
       ports:
         - protocol: TCP
-          port: 6379
+          port: 6379 # Redis/Valkey (TLS)
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 5432 # managed PostgreSQL
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443 # S3 Object Lock via VPC endpoint
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

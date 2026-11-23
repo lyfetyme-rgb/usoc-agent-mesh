@@ -57,6 +57,7 @@ from .security import (
     build_signer,
     configured_approvers,
     is_ephemeral_secret,
+    is_local_dev,
     read_secret,
     redact_fields,
     redact_url,
@@ -447,27 +448,66 @@ async def _run_bengal_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
-def _approval_store(settings: Settings, signer=None) -> FileApprovalStore:
+def _approval_store(settings: Settings, signer=None):
+    """Build the same approval backend the mesh uses (file for local dev)."""
     registry = load_approver_registry(settings)
     verifier = build_approval_verifier(settings, registry)
     approvers = configured_approvers(settings)
     if registry is not None:
         approvers = (approvers & registry.ids()) if approvers else registry.ids()
-    return FileApprovalStore(
-        settings.workspace / "approvals.json",
+    common = dict(
         signer=signer,
         approvers=approvers,
         require_allowlist=settings.require_approver_allowlist or settings.strict_prod,
         ttl_s=settings.approval_ttl_s,
         approver_verifier=verifier,
     )
+    if settings.approval_backend == "postgres":
+        from .postgres import PostgresApprovalStore
+
+        # Operators read the database directly: no stale hot cache in a CLI.
+        return PostgresApprovalStore(
+            dsn=settings.postgres_dsn or "",
+            shadow=settings.shadow_mode,
+            **common,
+        )
+    return FileApprovalStore(settings.workspace / "approvals.json", **common)
+
+
+def _evidence_chain(settings: Settings, signer=None):
+    """Return the configured OEKP chain (Postgres in the stateless topology)."""
+    if settings.evidence_backend == "postgres":
+        from .postgres import PostgresEvidenceChain, PsycopgBackend
+
+        return PostgresEvidenceChain(
+            PsycopgBackend(settings.postgres_dsn or ""), signer=signer
+        )
+    return EvidenceChain(settings.workspace / "evidence" / "chain.jsonl", signer=signer)
+
+
+def _cli_tenant(args: argparse.Namespace) -> str:
+    return str(getattr(args, "tenant", None) or "default").strip() or "default"
+
+
+def _tenant_kwargs(args: argparse.Namespace) -> dict:
+    # Omit the default so legacy/injected stores with the old one-argument API
+    # keep working; non-default tenants always use the explicit partition.
+    return {} if _cli_tenant(args) == "default" else {"tenant_id": _cli_tenant(args)}
 
 
 def cmd_approvals(args: argparse.Namespace) -> int:
     settings = _settings(args)
     signer = _signer(settings)
-    store = _approval_store(settings, signer)
-    pending = asyncio.run(store.pending())
+
+    async def load():
+        store = _approval_store(settings, signer)
+        try:
+            return await store.pending(**_tenant_kwargs(args))
+        finally:
+            if hasattr(store, "close"):
+                await store.close()
+
+    pending = asyncio.run(load())
     if store.rejected:
         print(
             f"[warn] {store.rejected} approval record(s) failed signature verification; "
@@ -515,19 +555,22 @@ def _credential_from_args(args: argparse.Namespace) -> ApprovalCredential | None
 
 def _log_verification_failure(settings: Settings, signer, args: argparse.Namespace, detail: str) -> None:
     """Record a rejected credential so OEKP shows failed verification attempts."""
-    chain = EvidenceChain(settings.workspace / "evidence" / "chain.jsonl", signer=signer)
-
     async def run():
-        await chain.append(
-            kind="approval.verification",
-            actor=args.by,
-            subsystem="hitl",
-            data={
-                "approval_id": args.approval_id,
-                "verified": False,
-                "detail": detail,
-            },
-        )
+        chain = _evidence_chain(settings, signer)
+        try:
+            await chain.append(
+                kind="approval.verification",
+                actor=args.by,
+                subsystem="hitl",
+                data={
+                    "approval_id": args.approval_id,
+                    "verified": False,
+                    "detail": detail,
+                },
+            )
+        finally:
+            if hasattr(chain, "close"):
+                await chain.close()
 
     asyncio.run(run())
 
@@ -543,80 +586,88 @@ def _decide(args: argparse.Namespace, approved: bool) -> int:
     store = _approval_store(settings, signer)
 
     async def run():
-        req = await store.decide(
-            args.approval_id,
-            approved=approved,
-            approver=args.by,
-            note=args.note,
-            credential=_credential_from_args(args),
-        )
-        chain = EvidenceChain(settings.workspace / "evidence" / "chain.jsonl", signer=signer)
-        if req.verification is not None:
+        chain = None
+        try:
+            req = await store.decide(
+                args.approval_id,
+                approved=approved,
+                approver=args.by,
+                note=args.note,
+                credential=_credential_from_args(args),
+                **_tenant_kwargs(args),
+            )
+            chain = _evidence_chain(settings, signer)
+            if req.verification is not None:
+                await chain.append(
+                    kind="approval.verification",
+                    actor=req.decided_by or args.by,
+                    subsystem="hitl",
+                    mission_id=req.mission_id,
+                    data=req.verification.model_dump(mode="json"),
+                )
             await chain.append(
-                kind="approval.verification",
+                kind="approval.decided",
                 actor=req.decided_by or args.by,
                 subsystem="hitl",
                 mission_id=req.mission_id,
-                data=req.verification.model_dump(mode="json"),
+                data={
+                    "approval_id": req.id,
+                    "approved": req.status.value == "approved",
+                    "action_class": req.action_class.value,
+                    "target": req.target,
+                    "risk": req.risk.value,
+                    "requested_by": req.requested_by,
+                    "decided_by": req.decided_by,
+                    "note": req.note,
+                    "provenance": req.provenance,
+                    "tainted": req.tainted,
+                    "credential_kind": req.credential.kind if req.credential else None,
+                    "quorum": req.quorum,
+                    "approvals": [d.model_dump(mode="json") for d in req.decisions],
+                    "amount": req.amount,
+                    "currency": req.currency,
+                    "verification": (
+                        req.verification.model_dump(mode="json")
+                        if req.verification
+                        else None
+                    ),
+                },
             )
-        await chain.append(
-            kind="approval.decided",
-            actor=req.decided_by or args.by,
-            subsystem="hitl",
-            mission_id=req.mission_id,
-            data={
-                "approval_id": req.id,
-                "approved": req.status.value == "approved",
-                "action_class": req.action_class.value,
-                "target": req.target,
-                "risk": req.risk.value,
-                "requested_by": req.requested_by,
-                "decided_by": req.decided_by,
-                "note": req.note,
-                "provenance": req.provenance,
-                "tainted": req.tainted,
-                "credential_kind": req.credential.kind if req.credential else None,
-                "quorum": req.quorum,
-                "approvals": [d.model_dump(mode="json") for d in req.decisions],
-                "amount": req.amount,
-                "currency": req.currency,
-                "verification": (
-                    req.verification.model_dump(mode="json")
-                    if req.verification
-                    else None
-                ),
-            },
-        )
-        publication = None
-        if settings.atlassian_bridge_enabled:
-            from .atlassian_bridge import build_bridge
-            from .egress import EgressGuard
+            publication = None
+            if settings.atlassian_bridge_enabled:
+                from .atlassian_bridge import build_bridge
+                from .egress import EgressGuard
 
-            EgressGuard(
-                block_tainted=settings.block_tainted_egress,
-                shadow=settings.shadow_mode,
-            ).assert_allowed(
-                target=f"atlassian:{settings.atlassian_base_url or 'adr'}",
-                tainted=req.tainted,
-                classification="restricted" if req.tainted else "internal",
-                signoffs=[req],
-                payload_digest=decision_payload_digest(req),
-                also_targets=[req.target],
-            )
-            bridge = build_bridge(settings, signer)
-            seq, digest = chain.head
-            try:
-                publication = bridge.publish_decision(
-                    req, {"seq": seq, "hash": digest}
+                EgressGuard(
+                    block_tainted=settings.block_tainted_egress,
+                    shadow=settings.shadow_mode,
+                ).assert_allowed(
+                    target=f"atlassian:{settings.atlassian_base_url or 'adr'}",
+                    tainted=req.tainted,
+                    classification="restricted" if req.tainted else "internal",
+                    signoffs=[req],
+                    payload_digest=decision_payload_digest(req),
+                    also_targets=[req.target],
                 )
-            except SecurityError as exc:
-                # The decision is already persisted and signed. Publication is
-                # idempotent, so an operator can retry with `publish-decision`.
-                print(
-                    f"[warn] decision recorded but Atlassian publication failed: {exc}",
-                    file=sys.stderr,
-                )
-        return req, publication
+                bridge = build_bridge(settings, signer)
+                seq, digest = chain.head
+                try:
+                    publication = bridge.publish_decision(
+                        req, {"seq": seq, "hash": digest}
+                    )
+                except SecurityError as exc:
+                    # The decision is already persisted and signed. Publication is
+                    # idempotent, so an operator can retry with `publish-decision`.
+                    print(
+                        f"[warn] decision recorded but Atlassian publication failed: {exc}",
+                        file=sys.stderr,
+                    )
+            return req, publication
+        finally:
+            if chain is not None and hasattr(chain, "close"):
+                await chain.close()
+            if hasattr(store, "close"):
+                await store.close()
 
     try:
         req, publication = asyncio.run(run())
@@ -815,6 +866,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         check(False, "message authentication", str(exc))
 
     ephemeral = is_ephemeral_secret(settings)
+    if not is_local_dev(settings):
+        check(
+            not ephemeral,
+            "persistent signing key",
+            "shared HMAC key or Ed25519/KMS keys are mandatory outside local dev",
+        )
     if settings.strict_prod:
         problems = validate_strict_prod(settings)
         if problems:
@@ -988,6 +1045,12 @@ async def _run_serve(args: argparse.Namespace) -> int:
     from .service import HealthServer
 
     settings = _settings(args)
+    if settings.strict_prod:
+        problems = validate_strict_prod(settings)
+        if problems:
+            raise SecurityError(
+                "AGENT_STRICT_PROD startup refused: " + "; ".join(problems)
+            )
     if getattr(args, "host", None):
         settings = settings.model_copy(update={"health_host": args.host})
     if getattr(args, "port", None) is not None:
@@ -1356,8 +1419,16 @@ def cmd_approval_payload(args: argparse.Namespace) -> int:
     binding claim (``nonce`` by default) to approve this exact decision.
     """
     settings = _settings(args)
-    store = _approval_store(settings, _signer(settings))
-    req = asyncio.run(store.get(args.approval_id))
+
+    async def load():
+        store = _approval_store(settings, _signer(settings))
+        try:
+            return await store.get(args.approval_id, **_tenant_kwargs(args))
+        finally:
+            if hasattr(store, "close"):
+                await store.close()
+
+    req = asyncio.run(load())
     if req is None:
         print(f"no such approval: {args.approval_id}")
         return 1
@@ -1508,6 +1579,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     approval_payload.add_argument("approval_id")
     approval_payload.add_argument("--by", required=True, help="approver identity")
+    approval_payload.add_argument("--tenant", default="default", help="approval tenant partition")
     decision = approval_payload.add_mutually_exclusive_group(required=True)
     decision.add_argument("--approve", action="store_true", help="payload for an approval")
     decision.add_argument("--deny", action="store_true", help="payload for a denial")
@@ -1540,17 +1612,20 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--url", help="health URL (default from settings)")
     probe.add_argument("--token", help="bearer token (default AGENT_HEALTH_TOKEN)")
     sub.add_parser("health", help="SHELL runtime health and integration diagnostics")
-    sub.add_parser("approvals", help="list pending human approvals")
+    approvals = sub.add_parser("approvals", help="list pending human approvals")
+    approvals.add_argument("--tenant", default="default", help="approval tenant partition")
 
     approve = sub.add_parser("approve", help="approve a pending action as a human")
     approve.add_argument("approval_id")
     approve.add_argument("--by", default="operator", help="approver identity")
+    approve.add_argument("--tenant", default="default", help="approval tenant partition")
     approve.add_argument("--note")
     _add_credential_args(approve)
 
     deny = sub.add_parser("deny", help="deny a pending action as a human")
     deny.add_argument("approval_id")
     deny.add_argument("--by", default="operator")
+    deny.add_argument("--tenant", default="default", help="approval tenant partition")
     deny.add_argument("--note")
     _add_credential_args(deny)
 

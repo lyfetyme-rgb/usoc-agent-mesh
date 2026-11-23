@@ -136,13 +136,34 @@ def read_secret(value: str | None, file: str | Path | None) -> str | None:
     return None
 
 
+def is_local_dev(settings: Any) -> bool:
+    """True only for a single-host, in-memory, non-production configuration.
+
+    Everything else (Redis bus, strict production, a transactional Postgres
+    backend, S3 WORM archival, or an explicit override) is a multi-pod-capable
+    deployment where an ephemeral per-process HMAC key must never be accepted:
+    a record written by pod A would be unverifiable by pod B after a restart.
+    """
+    if getattr(settings, "require_persistent_signing_key", False):
+        return False
+    if getattr(settings, "strict_prod", False):
+        return False
+    if str(getattr(settings, "bus", "memory") or "memory").lower() != "memory":
+        return False
+    if getattr(settings, "postgres_dsn", None) or getattr(settings, "archive_bucket", None):
+        return False
+    if getattr(settings, "evidence_backend", "file") == "postgres":
+        return False
+    return True
+
+
 def build_signer(settings: Any) -> Signer | None:
     """Return a signer, or ``None`` only when authentication is explicitly off.
 
-    With the memory bus, an ephemeral secret is generated per process: messages
-    are still authenticated inside that process, but nothing survives a restart.
-    With the Redis bus an explicit secret is mandatory, so a misconfigured deploy
-    fails at startup instead of silently running unauthenticated.
+    Local dev may generate an ephemeral in-process HMAC key. Outside local dev
+    a persistent shared key (env or mounted file) is mandatory so evidence and
+    approvals written by one control-plane replica verify on every other.
+    Ed25519/KMS modes are exempt because their keys are already persistent.
     """
     if not getattr(settings, "message_auth", True):
         return None
@@ -164,8 +185,11 @@ def build_signer(settings: Any) -> Signer | None:
         getattr(settings, "shared_secret_file", None),
     )
     if not secret:
-        if getattr(settings, "bus", "memory") == "redis":
-            raise SecurityError("AGENT_SHARED_SECRET (or AGENT_SHARED_SECRET_FILE) is required when AGENT_BUS=redis")
+        if not is_local_dev(settings):
+            raise SecurityError(
+                "AGENT_SHARED_SECRET (or AGENT_SHARED_SECRET_FILE) is mandatory outside "
+                "local dev: an ephemeral per-process key breaks multi-pod evidence verification"
+            )
         secret = secrets.token_hex(32)
     return Signer(secret, max_age_s=int(getattr(settings, "max_message_age_s", 0) or 0))
 
@@ -184,9 +208,9 @@ def is_ephemeral_secret(settings: Any) -> bool:
         # No shared secret is used at all, and build_ed25519_signer requires an
         # explicitly configured key set, so this is never an ephemeral value.
         return False
-    if getattr(settings, "bus", "memory") == "redis":
-        # A missing secret fails closed at startup for Redis instead of being
-        # silently replaced with a random value.
+    if not is_local_dev(settings):
+        # A missing secret fails closed at startup outside local dev instead of
+        # being silently replaced with a random value.
         return False
     return not (
         getattr(settings, "shared_secret", None)

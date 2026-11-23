@@ -68,7 +68,7 @@ of them as agents; the planner selects the subset a goal needs.
 | 5 Risk and policy evaluation | SERAPHIM + PolicyEngine | deterministic / no LLM, implemented |
 | 6 Simulation | CSSSF | LLM-backed coordinator, sandboxed tool scope |
 | 7 Independent assurance | BENGAL | deterministic / no LLM evidence verification + BAA threat-mode analysis |
-| 8 Human authorization | HITL + ApprovalStore | deterministic / no LLM, file-backed |
+| 8 Human authorization | HITL + ApprovalStore | deterministic / no LLM, Postgres-backed in production |
 | 9 Controlled execution | runtime + target allowlist | implemented, bounded |
 | 10 Independent validation | BENGAL | evidence chain verification + redacted BAA assessments |
 | 11 Evidence preservation | OEKP + EvidenceChain | deterministic / no LLM, append-only, hash-chained |
@@ -190,8 +190,9 @@ agent          policy engine        approval store          human
 A held task is re-dispatched with `approval_ref`. This is explicit by design: the
 skeleton does not silently resume work after a human decision, and it does not
 let an agent approve its own request. `HitlAgent` can present and record
-decisions; only `FileApprovalStore`/`InMemoryApprovalStore` transitions produce
-an approval.
+decisions; only an `ApprovalStore` transition produces an approval. In local dev
+that is the file/in-memory store; in production it is the tenant-partitioned
+`PostgresApprovalStore`, whose decision and nonce spend share one row lock.
 
 ## 4a. Fragmentation layer
 
@@ -590,15 +591,20 @@ point:
    pending messages.
 3. `RedisStore` is shared across replicas, so a redelivered task produces one
    handler execution.
-4. Multiple workers may append to the same evidence chain: the appender
-   re-reads the tail under the shared file lock before writing, so concurrent
-   processes cannot fork the chain.
+4. Multiple workers may append to the same evidence chain. In production,
+   `PostgresEvidenceChain` serialises appends with a row-locked head, assigns
+   sequence numbers in the database, and reloads/re-verifies after each append;
+   the local file chain with its file lock remains a dev-only path.
 5. Keep the orchestrator stateless per goal; it already keys everything by
    trace id.
-6. Move `FileApprovalStore` to a transactional multi-host store with
-   authenticated approver identities before production on multiple machines.
-   On one host the approval file is already serialized through the same lock.
-7. Ship the evidence chain to immutable storage and sign the head.
+6. `PostgresApprovalStore` is the transactional multi-host approval store. The
+   `tenant_id` partition isolates approvals, and the decision/governance check
+   plus nonce spend happen inside one `SELECT ... FOR UPDATE` transaction. Redis
+   caches reads only; it never authorises a spend.
+7. `S3WormArchiveSink` ships redacted, HMAC-chained ledger segments to S3 Object
+   Lock. Tenants have independent chains and key prefixes, and Object Lock plus
+   SSE makes the archive immutable at rest. Control-plane pods keep no approval,
+   evidence or archive state on disk and can be autoscaled.
 
 A complete example is in `docker-compose.workers.example.yml`: one control
 plane plus scale-on-demand workers (`--scale`). Demand scaling is a closed

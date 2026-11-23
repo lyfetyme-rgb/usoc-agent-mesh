@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .security import SecurityError, read_secret
@@ -203,6 +203,22 @@ class Settings(BaseSettings):
             )
         return ",".join(names)
 
+    @model_validator(mode="after")
+    def _production_backends_are_configured(self) -> "Settings":
+        if (
+            self.approval_backend == "postgres"
+            or self.ledger_backend == "postgres"
+            or self.evidence_backend == "postgres"
+        ) and not self.postgres_dsn:
+            raise ValueError(
+                "AGENT_POSTGRES_DSN is required when a postgres backend is selected"
+            )
+        if self.archive_backend == "s3" and not self.archive_bucket:
+            raise ValueError("AGENT_ARCHIVE_BUCKET is required when AGENT_ARCHIVE_BACKEND=s3")
+        if self.archive_retention_days < 1:
+            raise ValueError("archive_retention_days must be positive")
+        return self
+
     # fragmentation: read-only ingestion + cross-source correlation
     connectors_file: Path = Path("connectors.yaml")
     connector_timeout_s: float = 15.0
@@ -238,9 +254,39 @@ class Settings(BaseSettings):
     retry_jitter: bool = True
 
     # durable task state: hot Redis tier and signed cold archive
-    ledger_backend: Literal["memory", "redis"] = "memory"
+    ledger_backend: Literal["memory", "redis", "postgres"] = "memory"
     ledger_hot_ttl_s: int = 86_400
     ledger_archive_path: Path | None = None
+
+    # production governance storage: transactional, tenant-partitioned Postgres
+    # with a Redis hot cache. "file" keeps the legacy single-host behaviour for
+    # local dev; only "postgres" supports concurrent control-plane replicas.
+    approval_backend: Literal["file", "postgres"] = "file"
+    evidence_backend: Literal["file", "postgres"] = "file"
+    postgres_dsn: str | None = Field(default=None, repr=False)
+    postgres_approval_table: str = "governance_approvals"
+    postgres_ledger_table: str = "task_ledger_events"
+    approval_cache_ttl_s: float = 2.0
+    approval_cache_namespace: str = "usoc"
+
+    # async S3 Object Lock (WORM) evidence archival. "file" keeps the legacy
+    # signed JSONL on the shared /data PVC; "s3" makes control-plane pods fully
+    # stateless by streaming signed segments to immutable object storage.
+    archive_backend: Literal["file", "s3"] = "file"
+    # Dedicated WORM chain key. In HMAC clusters the shared cluster key is used
+    # when this is unset; asymmetric/KMS clusters must set it explicitly.
+    archive_secret: str | None = Field(default=None, repr=False)
+    archive_secret_file: Path | None = None
+    archive_bucket: str | None = None
+    archive_prefix: str = "usoc/task-ledger"
+    archive_region: str | None = None
+    archive_endpoint_url: str | None = None
+    archive_retention_days: int = 2_555  # ~7 years of WORM retention
+    archive_lock_mode: Literal["GOVERNANCE", "COMPLIANCE"] = "COMPLIANCE"
+
+    # Fail startup outside local dev when signing rests on an ephemeral,
+    # per-process HMAC key. Ed25519/KMS modes use persistent keys and are fine.
+    require_persistent_signing_key: bool = False
 
     # BENGAL BAA threat-mode analysis (IARPA BAA-24-03)
     bengal_eval_cases: Path = Path("fixtures/bengal/cases.jsonl")

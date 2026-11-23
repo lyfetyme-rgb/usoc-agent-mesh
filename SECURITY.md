@@ -403,6 +403,11 @@ injected HTTP transport, so no live Atlassian writes occur in CI.
 * With the memory bus the signing secret is ephemeral per process. Set
   `AGENT_SHARED_SECRET` if `agents approve` must verify approvals written by a
   different process; with Redis an explicit secret is mandatory.
+* Outside local dev (Redis bus, Postgres/DSN, S3 archive or
+  `AGENT_REQUIRE_PERSISTENT_SIGNING_KEY=1`), HMAC mode fails startup without
+  `AGENT_SHARED_SECRET` or `AGENT_SHARED_SECRET_FILE`. An ephemeral per-process
+  key would make another replica unable to verify approvals and evidence.
+  Ed25519/KMS modes are exempt because their keys are already persistent.
 * `redact_text` and `redact_fields` strip bearer/Basic tokens, URL credentials
   and query-string secrets from structured logs.
 * `python -m agents doctor` prints Redis URLs with the password masked.
@@ -434,14 +439,42 @@ At-least-once delivery means agents deduplicate side effects with
 and mission, so a shared store cannot return one agent's or tenant's result to
 another.
 
+### Stateless production storage
+
+Local development keeps approvals, OEKP evidence and the task ledger on disk.
+Production switches all three to tenant-partitioned Postgres and the signed
+ledger archive to S3 Object Lock:
+
+* `AGENT_APPROVAL_BACKEND=postgres` stores every approval under a `tenant_id`
+  partition. Decisions and nonce spends run inside
+  `SELECT ... FOR UPDATE` transactions, so a second replica cannot observe stale
+  state between the governance check and the write. Redis is only a short-lived
+  hot cache (`AGENT_APPROVAL_CACHE_TTL_S`); the signed row is the trust boundary.
+* `AGENT_EVIDENCE_BACKEND=postgres` uses a row-locked chain head. Sequence
+  numbers are assigned by the database under an advisory lock, and each replica
+  reloads and re-verifies the whole chain after appending.
+* `AGENT_LEDGER_BACKEND=postgres` removes the 2,048-slot in-memory cap. Events
+  are attributed to their originating tenant and ordered by a DB-assigned
+  sequence.
+* `AGENT_ARCHIVE_BACKEND=s3` streams redacted, HMAC-chained segments to S3 with
+  `ObjectLockMode`/`ObjectLockRetainUntilDate` and AES256 SSE. Each tenant has an
+  independent chain and key prefix; a missing, reordered or edited segment fails
+  verification.
+
+Require a dedicated `AGENT_ARCHIVE_SECRET_FILE` in Ed25519/KMS clusters; HMAC
+clusters may reuse the shared secret. The archive is observation-only: write
+failures increment a counter and never affect a task or policy decision.
+
 ### Filesystem and container
 
 * Approvals and evidence files are created `0600`; their directory is `0700` on
   POSIX. Windows relies on the user profile ACL.
 * `workspace.delete` is not registered unless `AGENT_ALLOW_WORKSPACE_DELETE=true`.
 * The image runs as UID/GID `10001`, drops all Linux capabilities, sets
-  `no-new-privileges`, and supports a read-only root filesystem. Only `/data`
-  (volume) and `/tmp` (tmpfs) are writable.
+  `no-new-privileges`, and supports a read-only root filesystem. In the local
+  Compose topology `/data` (volume) and `/tmp` (tmpfs) are writable. The
+  production Kubernetes topology has no `/data` mount at all: only `/tmp` is
+  writable, and all durable state is external.
 * Redis is on an internal Compose network; only the health port is published,
   and it binds to `127.0.0.1` by default.
 
@@ -923,7 +956,15 @@ docker compose --env-file .env.docker down
       `<workspace>/shadow` path, bridge disabled, and egress denied end to end;
       verify every chain record is `shadow: true` and BENGAL reports
       `trusted_for_execution=false`.
-- [ ] `/data` is a persistent volume; evidence and approvals are backed up.
+- [ ] `AGENT_APPROVAL_BACKEND`, `AGENT_EVIDENCE_BACKEND` and
+      `AGENT_LEDGER_BACKEND` are `postgres`; `AGENT_POSTGRES_DSN` is a managed,
+      private TLS DSN and its database is backed up.
+- [ ] `AGENT_ARCHIVE_BACKEND=s3`; the bucket has Object Lock enabled, SSE is on,
+      and retention matches the compliance policy.
+- [ ] `AGENT_ARCHIVE_SECRET_FILE` (or a persistent shared secret in HMAC mode) is
+      mounted read-only and distinct from the health/admin tokens.
+- [ ] Control-plane replicas are stateless: no `/data` volume, no local approval
+      file, no local OEKP chain, and HPA is enabled.
 - [ ] Redis is private, or TLS is enabled and the URL uses `rediss://`.
 - [ ] Logs are shipped somewhere tamper-resistant; `AGENT_LOG_JSON=true`.
 - [ ] `python -m agents doctor` passes in the deployed environment.
@@ -944,6 +985,9 @@ For `AGENT_STRICT_PROD=1`, additionally:
       production decision flows supply `--signature(-file)` or
       `--id-token(-file)`. OIDC mode has issuer, audience and JWKS URL configured
       with role-claim mapping if roles are enforced.
+- [ ] The Postgres/S3 backends above are configured; `validate_strict_prod()`
+      refuses strict startup with file-backed approvals/evidence/ledger or a
+      file-backed WORM archive.
 - [ ] `python -m agents doctor` reports `strict production ... managed keys,
       signed approvers and per-coordinator signatures` and exits 0.
 
@@ -981,9 +1025,9 @@ steps in the sections above.
 * The Redis password appears in the mesh container's environment. Docker secrets
   protect the shared secret and health token, but Redis URL credentials are still
   env-based. Use TLS and a private network, or a Redis ACL/credential provider.
-* Approval state is a local file by default. In a multi-host deployment, put it on
-  shared storage that preserves atomic replace and locking, or replace it with a
-  transactional database store.
+* Approval state is a local file by default for single-host dev. Multi-host
+  deployments must set `AGENT_APPROVAL_BACKEND=postgres`; shared filesystems are
+  no longer an acceptable substitute because NFS locking semantics vary.
 * In HMAC/dev mode there is no role-based authorization beyond the approver
   allowlist, and any process with the shared secret can sign as any agent; keep
   the secret to the mesh. `AGENT_STRICT_PROD=1` addresses both: per-coordinator
@@ -994,8 +1038,9 @@ steps in the sections above.
 * The health endpoint has no rate limiting. Keep it on loopback or behind a proxy.
 * `EchoLLM` is not a security boundary. Real model endpoints are untrusted and
   must remain outside the policy decision path.
-* The evidence chain is local JSONL. For production, ship the head to immutable
-  storage and monitor verification failures.
+* The evidence chain is local JSONL by default. Production uses
+  `AGENT_EVIDENCE_BACKEND=postgres` plus S3 Object Lock archival; monitor
+  `failed_writes` in the archive snapshot and evidence verification failures.
 * `taint_hash` commits to provenance labels and the taint flag, not to the
   payload bytes. Two different payloads carrying the same labels are not
   distinguishable at approval time; keep upstream provenance labels precise.
@@ -1003,8 +1048,9 @@ steps in the sections above.
   dev/HMAC mode the sender check still applies, but that mode is not a
   production trust boundary.
 * Approval consumption is atomic only against the configured store.
-  `FileApprovalStore` relies on cross-process file locking, so shared storage
-  must preserve it; use a transactional store for multi-host deployment.
+  `FileApprovalStore` relies on cross-process file locking and is dev-only;
+  `PostgresApprovalStore` makes the governance check and nonce spend one locked
+  transaction for multi-host deployment.
 * BENGAL's verification is structural. It reports rehearsal and sandbox-origin
   metadata and withholds `trusted_for_execution`, but it does not semantically
   prove that a governed action actually happened. Keep external execution

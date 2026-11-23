@@ -1,6 +1,8 @@
-# Single control-plane process: it owns the orchestrator, HITL approvals and
-# the evidence chain. Do NOT scale this deployment -- use the worker HPA in
-# 11-workers.yaml instead. One writer per signed chain is a security invariant.
+# Stateless control plane. Approvals, OEKP evidence and the task ledger are in
+# tenant-partitioned Postgres; Redis is a hot cache; the signed redacted ledger
+# chain is archived to S3 Object Lock. Replicas may append concurrently because
+# sequence assignment and nonce spends are row-locked transactions. No /data
+# volume and no single-writer assumption remain.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,10 +13,13 @@ metadata:
     role: control-plane
     app.kubernetes.io/part-of: usoc-mesh
 spec:
-  replicas: 1
+  replicas: 2
   minReadySeconds: 5
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
   selector:
     matchLabels:
       app: usoc-mesh
@@ -52,8 +57,15 @@ spec:
                 secretKeyRef:
                   name: usoc-mesh-secrets
                   key: redis-url
+            - name: AGENT_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: usoc-mesh-secrets
+                  key: postgres-dsn
             - name: AGENT_SHARED_SECRET_FILE
               value: "/run/secrets/agent_shared_secret"
+            - name: AGENT_ARCHIVE_SECRET_FILE
+              value: "/run/secrets/archive_secret"
             - name: AGENT_HEALTH_TOKEN_FILE
               value: "/run/secrets/health_token"
             - name: AGENT_ADMIN_TOKEN_FILE
@@ -93,17 +105,12 @@ spec:
               cpu: "2000m"
               memory: "4Gi"
           volumeMounts:
-            - name: data
-              mountPath: /data
             - name: tmp-scratch
               mountPath: /tmp
             - name: secrets
               mountPath: /run/secrets
               readOnly: true
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: usoc-mesh-data
         - name: tmp-scratch
           emptyDir:
             sizeLimit: 256Mi
@@ -114,10 +121,35 @@ spec:
             items:
               - key: agent-shared-secret
                 path: agent_shared_secret
+              - key: archive-secret
+                path: archive_secret
               - key: health-token
                 path: health_token
               - key: admin-token
                 path: admin_token
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: usoc-mesh-hpa
+  namespace: usoc-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: usoc-mesh
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
 ---
 apiVersion: v1
 kind: ServiceAccount

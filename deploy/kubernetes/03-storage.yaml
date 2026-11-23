@@ -1,25 +1,20 @@
-# Replace REPLACE_ME_RWX_STORAGE_CLASS with a ReadWriteMany class in your
-# cluster (EFS CSI on EKS, Filestore/NFS CSI on GKE, Azure Files on AKS).
+# The production topology is intentionally stateless: there is no RWX PVC.
 #
-# WHY RWX AND NOT AN emptyDir: the control plane and every worker instantiate
-# the same FileApprovalStore and EvidenceChain under AGENT_WORKSPACE. A per-pod
-# volume would fork the approval queue and the signed hash chain, so HPA would
-# silently split brain. This PVC is the Kubernetes equivalent of Compose's
-# shared `mesh-data` named volume -- not a Postgres/S3 backend (not implemented).
-#
-# OS file locks (async_exclusive_lock) are used for cross-process writes; the
-# chosen CSI driver must support flock/fcntl semantics on the mount.
+# Approvals, OEKP evidence and the task ledger live in tenant-partitioned
+# Postgres; Redis is a short-lived hot cache; the signed redacted ledger chain
+# is archived to S3 Object Lock (WORM). Control-plane and worker pods therefore
+# need only a per-pod /tmp emptyDir. This ConfigMap exists so `kubectl apply -f
+# deploy/kubernetes/` remains a deterministic, ordered operation and so the
+# policy is visible to operators auditing the manifests.
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: ConfigMap
 metadata:
-  name: usoc-mesh-data
+  name: usoc-mesh-storage-policy
   namespace: usoc-prod
   labels:
     app.kubernetes.io/part-of: usoc-mesh
-spec:
-  accessModes:
-    - ReadWriteMany
-  storageClassName: "REPLACE_ME_RWX_STORAGE_CLASS"
-  resources:
-    requests:
-      storage: 20Gi
+data:
+  policy: "stateless-control-plane"
+  durable-store: "postgresql://<managed Postgres> (tenant-partitioned approvals, OEKP evidence and task ledger)"
+  hot-cache: "external Redis/Valkey with TLS + AUTH"
+  worm-archive: "S3 Object Lock, COMPLIANCE mode, AES256 SSE"

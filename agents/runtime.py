@@ -614,6 +614,7 @@ class BaseAgent:
             tainted=spec.tainted,
             amount=spec.amount,
             currency=spec.currency,
+            tenant_id=spec.tenant_id or msg.tenant_id or "default",
         ),
         timeout=5.0,
     )
