@@ -672,4 +672,18 @@ def validate_strict_prod(settings: Any) -> list[str]:
         problems.append("AGENT_APPROVER_REGISTRY_PUBLIC_KEY_FILE is required")
     if not getattr(settings, "approver_registry_signature_file", None):
         problems.append("AGENT_APPROVER_REGISTRY_SIGNATURE_FILE is required")
+    # A strict multi-replica deployment must not fall back to host-local files:
+    # approvals, OEKP evidence and the ledger are shared transactional state,
+    # and the signed archive is immutable object storage rather than a PVC.
+    for name in ("approval_backend", "evidence_backend", "ledger_backend"):
+        if str(getattr(settings, name, "") or "") != "postgres":
+            problems.append(f"AGENT_{name.upper()}=postgres is required")
+    if str(getattr(settings, "archive_backend", "") or "") != "s3":
+        problems.append("AGENT_ARCHIVE_BACKEND=s3 is required")
+    if not getattr(settings, "postgres_dsn", None):
+        problems.append("AGENT_POSTGRES_DSN is required")
+    if not getattr(settings, "archive_bucket", None):
+        problems.append("AGENT_ARCHIVE_BUCKET is required")
+    if not getattr(settings, "archive_secret_file", None):
+        problems.append("AGENT_ARCHIVE_SECRET_FILE is required")
     return problems

@@ -657,7 +657,11 @@ just a laptop. The full threat model and deployment checklist are in
 | approval identity | `AGENT_APPROVERS` allowlist (dev) or a signed registry bound to a key/`sub` and a `max_tier` (production); requester != approver, pending/decided TTL, mission scope |
 | approval integrity | approval records are signed; unsigned or edited records are dropped |
 | human credential | production approvals carry a detached Ed25519 signature or an Okta/Entra `id_token`, verified by HITL and logged into OEKP |
-| cross-process approvals | the file store re-reads on change and writes under a lock, so CLI approvals reach a running `serve` |
+| cross-process approvals | the file store re-reads on change and writes under a lock for local dev; production uses tenant-partitioned Postgres with row-locked read-modify-write, so replicas cannot double-spend a nonce |
+| persistent signing key | HMAC clusters fail startup without `AGENT_SHARED_SECRET(_FILE)` outside local dev; Ed25519/KMS modes use persistent asymmetric keys |
+| tenant-partitioned Postgres | approvals, OEKP evidence and the task ledger are scoped by `tenant_id`; advisory locks assign DB sequence numbers and `SELECT ... FOR UPDATE` spans nonce spends |
+| Redis hot cache | approvals are cached only for `AGENT_APPROVAL_CACHE_TTL_S`; the signed Postgres row remains the trust boundary |
+| WORM evidence archive | signed, redacted ledger segments are written to S3 Object Lock with SSE and a future retention date; tenant chains and object keys are isolated |
 | evidence integrity | hash-chained records plus a keyed MAC; recomputing a hash without the secret still fails |
 | secret hygiene | file-based secrets, bearer/Basic/URL/query redaction in logs, masked Redis URLs in `doctor` |
 | model transport | remote LLM endpoints must use TLS; loopback HTTP is allowed for local models |
@@ -849,11 +853,14 @@ loopback. `/data` holds approvals and evidence on a named volume.
 For a clustered deployment, see [`deploy/kubernetes/README.md`](deploy/kubernetes/README.md).
 It provides hardened manifests (restricted Pod Security, read-only rootfs,
 exec probes that read the health token from a secret file, default-deny
-NetworkPolicies, a server-side dashboard proxy and worker HPAs). It also records
-what is deliberately **not** implemented: Postgres approvals, S3 Object Lock
-(WORM) evidence, an Atlassian egress proxy and a Helm chart. Shared `ReadWriteMany`
-storage is required because approvals and the signed evidence chain are
-file-backed; the control plane stays at one replica and only workers scale.
+NetworkPolicies, a server-side dashboard proxy and HPAs for both the control
+plane and workers). The production topology is fully stateless: approvals, OEKP
+evidence and the unbounded task ledger are tenant-partitioned in Postgres;
+Redis is a short-lived approval hot cache; and the signed, redacted ledger chain
+is archived to S3 Object Lock (WORM). There is no `ReadWriteMany` volume and no
+single-writer control-plane pod. Install the drivers with
+`pip install -e '.[postgres,s3,redis]'`. An Atlassian egress proxy and a Helm
+chart remain out of scope.
 
 To use the fragmentation layer in the container, copy `connectors.example.yaml`
 to `connectors.yaml`, review the mappings, uncomment the two read-only mounts in

@@ -68,12 +68,20 @@ def test_manifest_set_is_parseable_and_scoped_to_one_namespace():
             assert doc.get("metadata", {}).get("namespace") == "usoc-prod", doc
 
 
-def test_no_invented_backend_env_vars_or_latest_images():
-    """Postgres/S3 backends do not exist; silence here would be dangerous."""
+def test_only_real_backend_env_vars_and_no_latest_images():
+    """Only names read by Settings may appear; old blueprint names may not."""
     forbidden = {"DATABASE_URL", "EVIDENCE_S3_BUCKET", "REDIS_URL", "POSTGRES_URL"}
+    from agents.config import Settings
+
+    real_env = {f"AGENT_{field.upper()}" for field in Settings.model_fields}
+    real_env |= {
+        "USOC_DASHBOARD_HOST", "USOC_DASHBOARD_PORT", "USOC_DASHBOARD_ALLOWED_HOSTS"
+    }
     for source, _spec, container in pod_specs():
         names = {env.get("name") for env in container.get("env", [])}
         assert not (names & forbidden), (source, names & forbidden)
+        assert names <= real_env, (source, names - real_env)
+        assert names <= real_env, (source, names - real_env)
         assert not container["image"].endswith(":latest"), source
 
 
@@ -101,21 +109,13 @@ def test_every_container_keeps_the_section_6_hardening_invariants():
         ), source
 
 
-def test_shared_evidence_volume_is_a_rwx_pvc_not_a_per_pod_disk():
-    pvc = [doc for doc in by_kind("PersistentVolumeClaim") if doc["metadata"]["name"] == "usoc-mesh-data"]
-    assert len(pvc) == 1
-    assert "ReadWriteMany" in pvc[0]["spec"]["accessModes"]
-
-    data_mounts = 0
+def test_control_plane_is_stateless_with_no_rwx_pvc():
+    assert not by_kind("PersistentVolumeClaim"), "state now lives in Postgres/S3"
     for source, spec, container in pod_specs():
-        for mount in container.get("volumeMounts", []):
-            if mount["mountPath"] != "/data":
-                continue
-            data_mounts += 1
-            volumes = [v for v in spec["volumes"] if v["name"] == mount["name"]]
-            assert len(volumes) == 1, source
-            assert volumes[0].get("persistentVolumeClaim", {}).get("claimName") == "usoc-mesh-data", source
-    assert data_mounts >= 3  # control plane + both example workers
+        mounts = {mount["mountPath"] for mount in container.get("volumeMounts", [])}
+        assert "/data" not in mounts, source
+        for volume in spec.get("volumes", []):
+            assert "persistentVolumeClaim" not in volume, (source, volume)
 
 
 def test_tokens_are_mounted_files_and_never_inline_env_values():
@@ -144,19 +144,23 @@ def test_probes_use_the_secret_aware_cli_and_no_bearer_literal():
         assert not any("Bearer" in str(v) for v in container.get("env", [])), source
 
 
-def test_control_plane_is_single_writer_and_only_workers_scale():
+def test_control_plane_is_stateless_and_scales_with_workers():
     control = [doc for doc in by_kind("Deployment") if doc["metadata"]["name"] == "usoc-mesh"]
     assert len(control) == 1
-    assert control[0]["spec"]["replicas"] == 1
-    assert control[0]["spec"]["strategy"]["type"] == "Recreate"
+    assert control[0]["spec"]["replicas"] >= 2
+    assert control[0]["spec"]["strategy"]["type"] == "RollingUpdate"
 
     targets = {
         hpa["spec"]["scaleTargetRef"]["name"]
         for hpa in by_kind("HorizontalPodAutoscaler")
     }
-    assert targets
-    assert "usoc-mesh" not in targets
-    assert all(name.endswith("-worker") for name in targets), targets
+    assert "usoc-mesh" in targets, "the stateless control plane must autoscale"
+    assert any(name.endswith("-worker") for name in targets), targets
+
+    control_containers = control[0]["spec"]["template"]["spec"]["containers"]
+    env = {item["name"]: item for item in control_containers[0]["env"]}
+    assert env["AGENT_POSTGRES_DSN"]["valueFrom"]["secretKeyRef"]["name"] == "usoc-mesh-secrets"
+    assert env["AGENT_ARCHIVE_SECRET_FILE"]["value"].startswith("/run/secrets/")
 
 
 def test_network_policies_deny_by_default_and_allow_no_wildcard_egress():
@@ -183,9 +187,22 @@ def test_shared_config_uses_real_settings_and_no_secret_values():
     assert len(config) == 1
     data = config[0]["data"]
     assert data["AGENT_BUS"] == "redis"
-    assert data["AGENT_WORKSPACE"] == "/data/workspace"
+    assert data["AGENT_WORKSPACE"] == "/tmp/usoc-workspace"
     assert data["AGENT_REQUIRE_APPROVER_ALLOWLIST"] == "true"
+    for key, value in {
+        "AGENT_APPROVAL_BACKEND": "postgres",
+        "AGENT_EVIDENCE_BACKEND": "postgres",
+        "AGENT_LEDGER_BACKEND": "postgres",
+        "AGENT_ARCHIVE_BACKEND": "s3",
+        "AGENT_ARCHIVE_LOCK_MODE": "COMPLIANCE",
+    }.items():
+        assert data[key] == value
     assert "AGENT_STRICT_PROD" not in data  # opt-in only after trust files exist
+
+    from agents.config import Settings
+
+    real_env = {f"AGENT_{field.upper()}" for field in Settings.model_fields}
+    assert not (set(data) - real_env), set(data) - real_env
 
     assert not by_kind("Secret"), "real Secrets must not live in the repo"
     secret_template = next(

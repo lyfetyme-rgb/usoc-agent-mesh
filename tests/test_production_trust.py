@@ -553,6 +553,8 @@ def test_doctor_passes_with_full_production_trust(tmp_path, monkeypatch, capsys)
     mesh_key_path.write_text(private_key_pem(mesh_private), encoding="utf-8")
     bundle_path = tmp_path / "mesh_keys.json"
     bundle_path.write_text(json.dumps({"mesh-1": public_key_hex(mesh_public)}), encoding="utf-8")
+    archive_secret = tmp_path / "archive_secret"
+    archive_secret.write_text("archive-key-with-at-least-32-characters", encoding="utf-8")
 
     settings = _settings(
         tmp_path,
@@ -569,6 +571,13 @@ def test_doctor_passes_with_full_production_trust(tmp_path, monkeypatch, capsys)
         approver_registry_signature_file=sig_path,
         approver_registry_public_key_file=pub_path,
         approvers="alice",
+        approval_backend="postgres",
+        evidence_backend="postgres",
+        ledger_backend="postgres",
+        archive_backend="s3",
+        postgres_dsn="postgresql://user:pass@localhost:5432/usoc",
+        archive_bucket="usoc-evidence",
+        archive_secret_file=archive_secret,
     )
     assert validate_strict_prod(settings) == []
     monkeypatch.setattr(cli, "_settings", lambda args: settings)

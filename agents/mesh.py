@@ -21,7 +21,7 @@ from .config import Settings, get_settings
 from .connectors import IngestResult, load_connectors
 from .contracts import GoalResult
 from .correlation import CorrelationResult
-from .durable import RedisLedgerSink, SignedArchiveSink
+from .durable import FanoutLedgerSink, RedisLedgerSink, SignedArchiveSink
 from .evidence import EvidenceChain
 from .fragmentation import FragmentationReport, FragmentationService
 from .ingress import IngressGate, gate_from_settings
@@ -29,11 +29,24 @@ from .governance import ApprovalStore, FileApprovalStore, PolicyConfig, PolicyEn
 from .llm import EchoLLM, LLM, build_llm
 from .observability import Metrics, configure_logging, log
 from .orchestrator import LLMPlanner, Orchestrator, Planner, RouterPlanner
+from .postgres import (
+    PostgresApprovalStore,
+    PostgresEvidenceChain,
+    PostgresLedgerSink,
+    PsycopgBackend,
+)
 from .profiles import apply_role_profile, get_profile, settings_for_profile
 from .resilience import BreakerRegistry, IdempotencyConflict, IdempotencyRegistry
 from .registry import Registry, SubsystemSpec, load_registry
 from .runtime import SubsystemAgent
-from .security import SecurityError, Signer, build_signer, configured_approvers
+from .security import (
+    SecurityError,
+    Signer,
+    build_signer,
+    configured_approvers,
+    is_local_dev,
+    read_secret,
+)
 from .shell import Shell
 from .store import InMemoryStore, RedisStore, StateStore
 from .task_ledger import TaskLedger
@@ -45,6 +58,7 @@ from .trust import (
 )
 from .tools import ToolRegistry, build_default_tools, scoped_tool_registry
 from .usoc_agents import AiceeAgent, BengalAgent, HitlAgent, OekpAgent, SeraphimAgent
+from .worm import S3WormArchiveSink
 
 AGENT_CLASSES: dict[str, type[SubsystemAgent]] = {
     "aicee": AiceeAgent,
@@ -113,6 +127,9 @@ class Mesh:
         self._idempotency_override = idempotency
         self._breakers_override = breakers
         self._bengal_override = bengal_engine
+        # One shared SQL adapter per mesh; stores borrow it and Mesh owns its
+        # lifecycle so shutdown cannot close the same pool three times.
+        self._pg_backend: PsycopgBackend | None = None
         # Shadow runs get their own workspace so approvals, evidence and publish
         # state can never be confused with live state. CLI callers that already
         # point at a .../shadow workspace are not double-nested.
@@ -194,19 +211,60 @@ class Mesh:
             failure_threshold=self.settings.circuit_failure_threshold,
             reset_timeout_s=self.settings.circuit_reset_s,
         )
-        # Durable mirrors. Injected sinks always win. A dead Redis only counts a
-        # failed write (see RedisLedgerSink) so telemetry can never fail a task.
-        if self.ledger.sink is None and self.settings.ledger_backend == "redis":
-            self.ledger.sink = RedisLedgerSink(
-                url=self.settings.redis_url,
-                socket_timeout_s=self.settings.redis_socket_timeout_s,
-                hot_ttl_s=self.settings.ledger_hot_ttl_s,
+        # Durable mirrors. Injected sinks always win. A dead tier only counts a
+        # failed write so telemetry can never fail a task. Postgres is the
+        # unbounded source of truth; Redis is a short-lived hot cache in front.
+        if any(
+            getattr(self.settings, name) == "postgres"
+            for name in ("approval_backend", "ledger_backend", "evidence_backend")
+        ):
+            self._pg_backend = PsycopgBackend(
+                self.settings.postgres_dsn or "",
+                approval_table=self.settings.postgres_approval_table,
+                ledger_table=self.settings.postgres_ledger_table,
             )
-        if self.ledger.archive is None and self.settings.ledger_archive_path is not None:
-            self.ledger.archive = SignedArchiveSink(
-                path=self.settings.ledger_archive_path,
-                secret=self.settings.shared_secret or "usoc-local-archive",
+        if self.ledger.sink is None:
+            tiers: list[Any] = []
+            if self.settings.ledger_backend in ("redis", "postgres"):
+                tiers.append(
+                    RedisLedgerSink(
+                        url=self.settings.redis_url,
+                        socket_timeout_s=self.settings.redis_socket_timeout_s,
+                        hot_ttl_s=self.settings.ledger_hot_ttl_s,
+                    )
+                )
+            if self.settings.ledger_backend == "postgres":
+                tiers.append(PostgresLedgerSink(backend=self._pg_backend, close_backend=False))
+            self.ledger.sink = (
+                tiers[0] if len(tiers) == 1 else FanoutLedgerSink(*tiers) if tiers else None
             )
+        if self.ledger.archive is None:
+            archive_secret = read_secret(
+                self.settings.archive_secret, self.settings.archive_secret_file
+            ) or read_secret(self.settings.shared_secret, self.settings.shared_secret_file)
+            if self.settings.archive_backend == "s3" and not archive_secret:
+                if not is_local_dev(self.settings):
+                    raise SecurityError(
+                        "AGENT_ARCHIVE_SECRET (or AGENT_ARCHIVE_SECRET_FILE) is required "
+                        "for S3 WORM archival outside local dev"
+                    )
+                archive_secret = "usoc-local-archive"
+            archive_secret = archive_secret or "usoc-local-archive"
+            if self.settings.archive_backend == "s3":
+                self.ledger.archive = S3WormArchiveSink(
+                    bucket=self.settings.archive_bucket or "",
+                    secret=archive_secret,
+                    prefix=self.settings.archive_prefix,
+                    region=self.settings.archive_region,
+                    endpoint_url=self.settings.archive_endpoint_url,
+                    retention_days=self.settings.archive_retention_days,
+                    lock_mode=self.settings.archive_lock_mode,
+                )
+            elif self.settings.ledger_archive_path is not None:
+                self.ledger.archive = SignedArchiveSink(
+                    path=self.settings.ledger_archive_path,
+                    secret=archive_secret,
+                )
 
         self.message_authority = build_message_authority(self.settings)
         if isinstance(self.message_authority, CoordinatorKeyring):
@@ -220,7 +278,19 @@ class Mesh:
         self.approver_verifier = build_approval_verifier(
             self.settings, self.approver_registry
         )
-        self.evidence = EvidenceChain(self._workspace / "evidence" / "chain.jsonl", signer=self.signer)
+        if self.settings.evidence_backend == "postgres":
+            # Shared-nothing OEKP chain: appends are serialised by a row lock,
+            # so any control-plane replica can be the writer at any moment.
+            self.evidence = PostgresEvidenceChain(
+                self._pg_backend,
+                signer=self.signer,
+                tenant_id="default",
+                close_backend=False,
+            )
+        else:
+            self.evidence = EvidenceChain(
+                self._workspace / "evidence" / "chain.jsonl", signer=self.signer
+            )
         tools = build_default_tools(
             self._workspace,
             self.evidence,
@@ -276,15 +346,47 @@ class Mesh:
             # The signed registry is authoritative; a configured plain name
             # that is absent from it must never be able to approve.
             approvers = (approvers & self.approver_registry.ids()) if approvers else self.approver_registry.ids()
-        self.approvals = self._approvals_override or FileApprovalStore(
-            self._workspace / "approvals.json",
-            signer=self.signer,
-            approvers=approvers,
-            require_allowlist=self.settings.require_approver_allowlist
-            or self.settings.strict_prod,
-            ttl_s=self.settings.approval_ttl_s,
-            approver_verifier=self.approver_verifier,
-        )
+        if self._approvals_override is not None:
+            self.approvals = self._approvals_override
+        elif self.settings.approval_backend == "postgres":
+            # Transactional, tenant-partitioned approvals with a Redis hot cache.
+            # A cache outage degrades to the database; the database is always
+            # authoritative for nonce spends and signature verification.
+            cache: Any = None
+            try:
+                import redis.asyncio as aioredis
+
+                cache = aioredis.Redis.from_url(
+                    self.settings.redis_url,
+                    socket_timeout=self.settings.redis_socket_timeout_s,
+                    decode_responses=True,
+                )
+            except Exception:  # pragma: no cover - redis extra is optional
+                cache = None
+            self.approvals = PostgresApprovalStore(
+                self._pg_backend,
+                cache=cache,
+                close_backend=False,
+                cache_ttl_s=self.settings.approval_cache_ttl_s,
+                namespace=self.settings.approval_cache_namespace,
+                shadow=self.settings.shadow_mode,
+                signer=self.signer,
+                approvers=approvers,
+                require_allowlist=self.settings.require_approver_allowlist
+                or self.settings.strict_prod,
+                ttl_s=self.settings.approval_ttl_s,
+                approver_verifier=self.approver_verifier,
+            )
+        else:
+            self.approvals = FileApprovalStore(
+                self._workspace / "approvals.json",
+                signer=self.signer,
+                approvers=approvers,
+                require_allowlist=self.settings.require_approver_allowlist
+                or self.settings.strict_prod,
+                ttl_s=self.settings.approval_ttl_s,
+                approver_verifier=self.approver_verifier,
+            )
         targets = [t.strip() for t in self.settings.allowed_targets.split(",") if t.strip()]
 
         async def record_consumed_approval(request: Any, **context: Any) -> None:
@@ -457,6 +559,18 @@ class Mesh:
                     pass
         # Drain hot/cold mirrors last so the final transition is not lost.
         await self.ledger.flush()
+        for sink in (self.ledger.sink, self.ledger.archive, self.evidence):
+            if sink is not None and hasattr(sink, "close"):
+                try:
+                    await sink.close()
+                except Exception:
+                    pass
+        if self._pg_backend is not None:
+            try:
+                await self._pg_backend.close()
+            except Exception:
+                pass
+            self._pg_backend = None
         self._started = False
         log("mesh.stopped")
 

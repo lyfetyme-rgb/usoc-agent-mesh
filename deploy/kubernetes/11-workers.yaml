@@ -1,7 +1,7 @@
-# Stateless bus consumers. Same image, same shared RWX /data, different agent
-# filter. Workers never run the orchestrator and are the only things the HPA
-# scales. Add a Deployment per coordinator you want to scale out; `oekp` and
-# `bengal` are the shipped examples (see docker-compose.workers.example.yml).
+# Stateless bus consumers. Same image as the control plane, but no /data and no
+# orchestrator. All governance state comes from Postgres/Redis and WORM archival
+# goes to S3, so every worker replica is disposable. Add a Deployment per
+# coordinator you want to scale out; `oekp` and `bengal` are the shipped examples.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,8 +49,15 @@ spec:
                 secretKeyRef:
                   name: usoc-mesh-secrets
                   key: redis-url
+            - name: AGENT_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: usoc-mesh-secrets
+                  key: postgres-dsn
             - name: AGENT_SHARED_SECRET_FILE
               value: "/run/secrets/agent_shared_secret"
+            - name: AGENT_ARCHIVE_SECRET_FILE
+              value: "/run/secrets/archive_secret"
             - name: AGENT_HEALTH_TOKEN_FILE
               value: "/run/secrets/health_token"
           ports:
@@ -85,17 +92,12 @@ spec:
               cpu: "1000m"
               memory: "2Gi"
           volumeMounts:
-            - name: data
-              mountPath: /data
             - name: tmp-scratch
               mountPath: /tmp
             - name: secrets
               mountPath: /run/secrets
               readOnly: true
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: usoc-mesh-data
         - name: tmp-scratch
           emptyDir:
             sizeLimit: 256Mi
@@ -106,6 +108,8 @@ spec:
             items:
               - key: agent-shared-secret
                 path: agent_shared_secret
+              - key: archive-secret
+                path: archive_secret
               - key: health-token
                 path: health_token
 ---
@@ -179,8 +183,15 @@ spec:
                 secretKeyRef:
                   name: usoc-mesh-secrets
                   key: redis-url
+            - name: AGENT_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: usoc-mesh-secrets
+                  key: postgres-dsn
             - name: AGENT_SHARED_SECRET_FILE
               value: "/run/secrets/agent_shared_secret"
+            - name: AGENT_ARCHIVE_SECRET_FILE
+              value: "/run/secrets/archive_secret"
             - name: AGENT_HEALTH_TOKEN_FILE
               value: "/run/secrets/health_token"
           ports:
@@ -215,17 +226,12 @@ spec:
               cpu: "1000m"
               memory: "2Gi"
           volumeMounts:
-            - name: data
-              mountPath: /data
             - name: tmp-scratch
               mountPath: /tmp
             - name: secrets
               mountPath: /run/secrets
               readOnly: true
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: usoc-mesh-data
         - name: tmp-scratch
           emptyDir:
             sizeLimit: 256Mi
@@ -236,6 +242,8 @@ spec:
             items:
               - key: agent-shared-secret
                 path: agent_shared_secret
+              - key: archive-secret
+                path: archive_secret
               - key: health-token
                 path: health_token
 ---

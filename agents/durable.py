@@ -188,6 +188,58 @@ class RedisLedgerSink:
             await self._client.aclose()
 
 
+class FanoutLedgerSink:
+    """Mirror ledger events to several sinks (e.g. Redis hot + Postgres cold).
+
+    Each sink is independent: one failing sink cannot stop the others or affect
+    execution. Queries and snapshots come from the first sink that supports the
+    operation, preferring the durable (last) sink so unbounded history wins.
+    """
+
+    def __init__(self, *sinks: Any) -> None:
+        self.sinks = list(sinks)
+
+    def emit(self, event: TaskEvent) -> None:
+        for sink in self.sinks:
+            try:
+                sink.emit(event)
+            except Exception:
+                pass
+
+    async def flush(self) -> None:
+        for sink in self.sinks:
+            if hasattr(sink, "flush"):
+                try:
+                    await sink.flush()
+                except Exception:
+                    pass
+
+    async def query(self, **kwargs: Any) -> list[dict[str, Any]]:
+        for sink in reversed(self.sinks):
+            if hasattr(sink, "query"):
+                try:
+                    return await sink.query(**kwargs)
+                except Exception:
+                    continue
+        return []
+
+    def snapshot(self) -> dict[str, Any]:
+        snapshots = [
+            sink.snapshot()
+            for sink in self.sinks
+            if hasattr(sink, "snapshot")
+        ]
+        return {"backend": "fanout", "tiers": snapshots}
+
+    async def close(self) -> None:
+        for sink in self.sinks:
+            if hasattr(sink, "close"):
+                try:
+                    await sink.close()
+                except Exception:
+                    pass
+
+
 class SignedArchiveSink:
     """Append-only HMAC hash chain over redacted task events.
 
@@ -245,4 +297,10 @@ class SignedArchiveSink:
         return {"backend": "signed-jsonl", "records": len(self._records), "verified": self.verify()}
 
 
-__all__ = ["LedgerSink", "InMemoryLedgerSink", "RedisLedgerSink", "SignedArchiveSink"]
+__all__ = [
+    "LedgerSink",
+    "InMemoryLedgerSink",
+    "RedisLedgerSink",
+    "FanoutLedgerSink",
+    "SignedArchiveSink",
+]

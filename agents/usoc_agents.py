@@ -118,9 +118,10 @@ class HitlAgent(SubsystemAgent):
         if self.approvals is None:
             return Failure(code="hitl_unavailable", message="approval store not configured")
 
+        tenant_id = spec.tenant_id or msg.tenant_id or "default"
         approval_id = spec.inputs.get("approval_id")
         if approval_id:
-            request = await self.approvals.get(str(approval_id))
+            request = await self.approvals.get(str(approval_id), tenant_id=tenant_id)
             if request is None:
                 return Failure(code="not_found", message=f"no approval {approval_id}")
             return TaskResult(
@@ -137,6 +138,7 @@ class HitlAgent(SubsystemAgent):
 
         request = await self.approvals.request(
             ApprovalRequest(
+                tenant_id=tenant_id,
                 action_class=action,
                 target=str(spec.inputs.get("target") or spec.target or ""),
                 risk=risk,
@@ -166,7 +168,9 @@ class HitlAgent(SubsystemAgent):
         if self.approvals is None:
             return QueryReply(answer="approval store unavailable")
         if "pending" in query.question.lower():
-            pending = await self.approvals.pending()
+            pending = await self.approvals.pending(
+                tenant_id=getattr(query, "tenant_id", None) or "default"
+            )
             listing = "\n".join(f"- {r.id} {r.action_class.value} {r.target} ({r.requested_by})" for r in pending)
             return QueryReply(answer=f"{len(pending)} pending approvals\n{listing}".strip())
         # Never fall back to the generic LLM query path. HITL is deterministic:

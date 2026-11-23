@@ -18,10 +18,23 @@ data:
   AGENT_APPROVAL_TTL_S: "86400"
   AGENT_APPROVAL_REQUIRE_CREDENTIAL: "1"
   AGENT_RECLAIM_INTERVAL_S: "30"
-  # Evidence is a local signed JSONL chain and approvals are a signed,
-  # atomically replaced file. They need a shared RWX volume (see 03-storage).
-  AGENT_WORKSPACE: "/data/workspace"
+
+  # Stateless production topology. Approvals, OEKP evidence and the unbounded
+  # task ledger are tenant-partitioned in Postgres; Redis is only a hot cache.
+  # S3 Object Lock replaces the old shared /data signed-archive volume.
+  AGENT_APPROVAL_BACKEND: "postgres"
+  AGENT_EVIDENCE_BACKEND: "postgres"
+  AGENT_LEDGER_BACKEND: "postgres"
+  AGENT_ARCHIVE_BACKEND: "s3"
+  AGENT_ARCHIVE_BUCKET: "REPLACE_ME_WORM_BUCKET"
+  AGENT_ARCHIVE_PREFIX: "usoc/task-ledger"
+  AGENT_ARCHIVE_REGION: "REPLACE_ME_AWS_REGION"
+  AGENT_ARCHIVE_LOCK_MODE: "COMPLIANCE"
+  AGENT_ARCHIVE_RETENTION_DAYS: "2555"
+  # /tmp is the only writable path in the read-only-rootfs pods. No /data mount.
+  AGENT_WORKSPACE: "/tmp/usoc-workspace"
   AGENT_SUBSYSTEMS_FILE: "/app/subsystems.yaml"
+
   # Tighten after pinning subsystems.yaml and provisioning per-coordinator
   # Ed25519 bus keys + the signed approver registry (see README).
   # AGENT_STRICT_PROD: "1"

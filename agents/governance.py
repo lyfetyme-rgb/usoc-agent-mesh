@@ -205,6 +205,10 @@ class ApprovalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(default_factory=lambda: f"apr-{uuid.uuid4().hex[:10]}")
+    # Partition key. It is covered by the record signature and the credential
+    # binding digest, so an approval issued for one tenant cannot be replayed
+    # against another tenant even when both use the same approval id.
+    tenant_id: str = Field(default="default", max_length=200)
     action_class: ActionClass
     target: str
     risk: RiskLevel
@@ -268,6 +272,7 @@ def decision_payload_digest(req: ApprovalRequest) -> str:
     """
     scope = {
         "id": req.id,
+        "tenant_id": req.tenant_id,
         "action_class": req.action_class.value,
         "target": req.target,
         "risk": req.risk.value,
@@ -286,7 +291,7 @@ def decision_payload_digest(req: ApprovalRequest) -> str:
 
 class ApprovalStore(Protocol):
     async def request(self, req: ApprovalRequest) -> ApprovalRequest: ...
-    async def get(self, approval_id: str) -> ApprovalRequest | None: ...
+    async def get(self, approval_id: str, *, tenant_id: str = "default") -> ApprovalRequest | None: ...
     async def decide(
         self,
         approval_id: str,
@@ -295,10 +300,16 @@ class ApprovalStore(Protocol):
         approver: str,
         note: str | None = None,
         credential: ApprovalCredential | None = None,
+        tenant_id: str = "default",
     ) -> ApprovalRequest: ...
-    async def pending(self) -> list[ApprovalRequest]: ...
+    async def pending(self, *, tenant_id: str = "default") -> list[ApprovalRequest]: ...
     async def consume(
-        self, approval_id: str, *, nonce: str, correlation_id: str = ""
+        self,
+        approval_id: str,
+        *,
+        nonce: str,
+        correlation_id: str = "",
+        tenant_id: str = "default",
     ) -> ApprovalRequest | None: ...
     async def close(self) -> None: ...
 
@@ -383,13 +394,19 @@ class InMemoryApprovalStore:
         req = req.model_copy(update=issued)
         req = self._sign(req)
         async with self._lock:
-            if req.id in self._items:
+            existing = self._items.get(req.id)
+            if existing is not None:
                 raise ValueError(f"approval {req.id} already exists")
             self._items[req.id] = req
         return req
 
-    async def get(self, approval_id: str) -> ApprovalRequest | None:
-        return self._items.get(approval_id)
+    @staticmethod
+    def _in_tenant(req: ApprovalRequest | None, tenant_id: str) -> bool:
+        return req is not None and (req.tenant_id or "default") == tenant_id
+
+    async def get(self, approval_id: str, *, tenant_id: str = "default") -> ApprovalRequest | None:
+        req = self._items.get(approval_id)
+        return req if self._in_tenant(req, tenant_id) else None
 
     async def decide(
         self,
@@ -399,10 +416,11 @@ class InMemoryApprovalStore:
         approver: str,
         note: str | None = None,
         credential: ApprovalCredential | None = None,
+        tenant_id: str = "default",
     ) -> ApprovalRequest:
         async with self._lock:
             req = self._items.get(approval_id)
-            if req is None:
+            if not self._in_tenant(req, tenant_id):
                 raise KeyError(f"no such approval: {approval_id}")
             if req.status is not ApprovalStatus.PENDING:
                 raise ValueError(f"approval {approval_id} already {req.status.value}")
@@ -466,7 +484,12 @@ class InMemoryApprovalStore:
             return updated
 
     async def consume(
-        self, approval_id: str, *, nonce: str, correlation_id: str = ""
+        self,
+        approval_id: str,
+        *,
+        nonce: str,
+        correlation_id: str = "",
+        tenant_id: str = "default",
     ) -> ApprovalRequest | None:
         """Atomically spend an approval's single-use nonce.
 
@@ -476,7 +499,7 @@ class InMemoryApprovalStore:
         """
         async with self._lock:
             req = self._items.get(approval_id)
-            if req is None:
+            if not self._in_tenant(req, tenant_id):
                 return None
             # A partial quorum is still PENDING: the first human's signature
             # must never spend the nonce and must never become a cached terminal
@@ -502,8 +525,12 @@ class InMemoryApprovalStore:
             self._items[approval_id] = spent
             return spent
 
-    async def pending(self) -> list[ApprovalRequest]:
-        return [r for r in self._items.values() if r.status is ApprovalStatus.PENDING]
+    async def pending(self, *, tenant_id: str = "default") -> list[ApprovalRequest]:
+        return [
+            r
+            for r in self._items.values()
+            if r.status is ApprovalStatus.PENDING and self._in_tenant(r, tenant_id)
+        ]
 
     async def close(self) -> None:
         return None
@@ -605,9 +632,9 @@ class FileApprovalStore(InMemoryApprovalStore):
             self._save()
             return result
 
-    async def get(self, approval_id: str) -> ApprovalRequest | None:
+    async def get(self, approval_id: str, *, tenant_id: str = "default") -> ApprovalRequest | None:
         self._refresh()
-        return self._items.get(approval_id)
+        return await super().get(approval_id, tenant_id=tenant_id)
 
     async def decide(
         self,
@@ -617,6 +644,7 @@ class FileApprovalStore(InMemoryApprovalStore):
         approver: str,
         note: str | None = None,
         credential: ApprovalCredential | None = None,
+        tenant_id: str = "default",
     ) -> ApprovalRequest:
         async with async_exclusive_lock(self.path):
             self._refresh()
@@ -626,25 +654,34 @@ class FileApprovalStore(InMemoryApprovalStore):
                 approver=approver,
                 note=note,
                 credential=credential,
+                tenant_id=tenant_id,
             )
             self._save()
             return result
 
     async def consume(
-        self, approval_id: str, *, nonce: str, correlation_id: str = ""
+        self,
+        approval_id: str,
+        *,
+        nonce: str,
+        correlation_id: str = "",
+        tenant_id: str = "default",
     ) -> ApprovalRequest | None:
         async with async_exclusive_lock(self.path):
             self._refresh()
             result = await super().consume(
-                approval_id, nonce=nonce, correlation_id=correlation_id
+                approval_id,
+                nonce=nonce,
+                correlation_id=correlation_id,
+                tenant_id=tenant_id,
             )
             if result is not None:
                 self._save()
             return result
 
-    async def pending(self) -> list[ApprovalRequest]:
+    async def pending(self, *, tenant_id: str = "default") -> list[ApprovalRequest]:
         self._refresh()
-        return await super().pending()
+        return await super().pending(tenant_id=tenant_id)
 
 
 class PolicyConfig(BaseModel):
@@ -735,6 +772,7 @@ class PolicyEngine:
         tainted: bool = False,
         amount: str | Decimal | None = None,
         currency: str | None = None,
+        tenant_id: str = "default",
     ) -> GovernanceDecision:
         ref = self.policy_ref(action, target, risk)
         governed = action in self.config.governed_actions
@@ -813,7 +851,7 @@ class PolicyEngine:
         # below) so the approver sees the poisoned upstream chain, and a tainted
         # action may never reuse an approval issued without that disclosure.
         if approval_ref:
-            request = await self.approvals.get(approval_ref)
+            request = await self.approvals.get(approval_ref, tenant_id=tenant_id)
             if request is None:
                 return GovernanceDecision(
                     decision=DecisionType.DENY,
@@ -1057,6 +1095,7 @@ class PolicyEngine:
                     approval_ref,
                     nonce=request.nonce or request.id,
                     correlation_id=correlation_id,
+                    tenant_id=tenant_id,
                 )
             except Exception as exc:  # never fail open on an audit/store error
                 return GovernanceDecision(
@@ -1115,7 +1154,7 @@ class PolicyEngine:
         duplicate = next(
             (
                 r
-                for r in await self.approvals.pending()
+                for r in await self.approvals.pending(tenant_id=tenant_id)
                 if r.action_class is action
                 and r.target == (target or "")
                 and r.correlation_id == correlation_id
@@ -1136,6 +1175,7 @@ class PolicyEngine:
             )
 
         request = ApprovalRequest(
+            tenant_id=tenant_id,
             action_class=action,
             target=target or "",
             risk=risk,
