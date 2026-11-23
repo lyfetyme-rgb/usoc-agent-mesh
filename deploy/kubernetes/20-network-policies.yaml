@@ -1,0 +1,156 @@
+# Zero-trust perimeter. Requires a NetworkPolicy-capable CNI (Calico/Cilium/
+# AWS VPC CNI with NP support). Managed Redis is outside the cluster, so its
+# CIDR is an explicit placeholder -- replace 10.0.0.0/8 with your real endpoint.
+#
+# Deliberately NOT allowed: direct egress to gateway-cloud-functions, h-lift,
+# Atlassian or any model provider. USOC's Atlassian bridge is opt-in and
+# approval-gated, but no egress-proxy image ships in this repo, so the secure
+# default is to deny it until you provide one and add a narrow policy below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: usoc-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: usoc-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: usoc-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dashboard-ingress
+  namespace: usoc-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: dashboard-proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only an authenticating ingress controller may reach the proxy. Replace
+    # the namespace label with your ingress controller's namespace; the
+    # optional Ingress example configures external auth + TLS in front of it.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: REPLACE_ME_INGRESS_NAMESPACE
+      ports:
+        - protocol: TCP
+          port: 8090
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mesh-ingress
+  namespace: usoc-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: usoc-mesh
+      role: control-plane
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only the server-side proxy can call /health, /ready or /diagnostics.
+    # This is what keeps AGENT_HEALTH_TOKEN off the browser.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: dashboard-proxy
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mesh-egress
+  namespace: usoc-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: usoc-mesh
+      role: control-plane
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8 # REPLACE with the managed Redis/Valkey CIDR
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-egress
+  namespace: usoc-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: usoc-worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8 # REPLACE with the managed Redis/Valkey CIDR
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dashboard-egress
+  namespace: usoc-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: dashboard-proxy
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: usoc-mesh
+              role: control-plane
+      ports:
+        - protocol: TCP
+          port: 8080

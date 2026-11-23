@@ -1,0 +1,34 @@
+# OPT-IN EXAMPLE -- intentionally NOT applied by `kubectl apply -f .`
+# (the .example suffix keeps it out of the directory apply). Rename to .yaml
+# only after you have configured an authenticating ingress controller.
+#
+# The dashboard proxy itself has no login or CSRF protection; it was designed
+# for loopback use. Before exposing it, the ingress MUST enforce external
+# authentication (example below uses ingress-nginx external auth) and TLS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: usoc-dashboard
+  namespace: usoc-prod
+  annotations:
+    nginx.ingress.kubernetes.io/auth-url: "https://REPLACE_ME_OAUTH2_PROXY/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://REPLACE_ME_OAUTH2_PROXY/start"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  ingressClassName: REPLACE_ME_INGRESS_CLASS
+  tls:
+    - hosts:
+        - REPLACE_ME_DASHBOARD_HOST
+      secretName: REPLACE_ME_TLS_SECRET
+  rules:
+    - host: REPLACE_ME_DASHBOARD_HOST
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: usoc-dashboard
+                port:
+                  name: http

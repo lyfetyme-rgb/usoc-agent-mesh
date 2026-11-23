@@ -1,0 +1,35 @@
+# Non-secret settings shared by the control plane, workers and the proxy.
+# Every key maps to a real Settings field (AGENT_ prefix, see agents/config.py)
+# except the USOC_DASHBOARD_* proxy settings consumed by dashboard/server.py.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: usoc-mesh-config
+  namespace: usoc-prod
+  labels:
+    app.kubernetes.io/part-of: usoc-mesh
+data:
+  AGENT_BUS: "redis"
+  AGENT_HEALTH_HOST: "0.0.0.0"
+  AGENT_LOG_JSON: "true"
+  AGENT_REQUIRE_APPROVER_ALLOWLIST: "true"
+  AGENT_APPROVERS: "alice,bob"
+  AGENT_ALLOWED_TARGETS: "sandbox/*,staging/*"
+  AGENT_APPROVAL_TTL_S: "86400"
+  AGENT_APPROVAL_REQUIRE_CREDENTIAL: "1"
+  AGENT_RECLAIM_INTERVAL_S: "30"
+  # Evidence is a local signed JSONL chain and approvals are a signed,
+  # atomically replaced file. They need a shared RWX volume (see 03-storage).
+  AGENT_WORKSPACE: "/data/workspace"
+  AGENT_SUBSYSTEMS_FILE: "/app/subsystems.yaml"
+  # Tighten after pinning subsystems.yaml and provisioning per-coordinator
+  # Ed25519 bus keys + the signed approver registry (see README).
+  # AGENT_STRICT_PROD: "1"
+  # AGENT_REQUIRE_SUBSYSTEMS_INTEGRITY: "true"
+  # AGENT_SUBSYSTEMS_MANIFEST_HASH: "<sha256 from `python -m agents integrity`>"
+  # AGENT_SIGNING_MODE: "ed25519"
+  # AGENT_ED25519_PUBLIC_KEYS_FILE: "/run/secrets/ed25519-public-keys.json"
+  # AGENT_BUS_PUBLIC_KEYS_FILE: "/run/secrets/bus-public-keys.json"
+  # AGENT_APPROVER_REGISTRY_FILE: "/run/secrets/approver-registry.json"
+  # AGENT_APPROVER_REGISTRY_SIGNATURE_FILE: "/run/secrets/approver-registry.json.sig"
+  # AGENT_APPROVER_REGISTRY_PUBLIC_KEY_FILE: "/run/secrets/approver-public.hex"

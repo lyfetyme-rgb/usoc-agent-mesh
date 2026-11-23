@@ -24,6 +24,33 @@ MAX_REQUEST_WORKERS = 8
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
+def dashboard_host() -> str:
+    """Bind address. Loopback-only unless a cluster deployment opts in."""
+    return config_value("USOC_DASHBOARD_HOST", "127.0.0.1") or "127.0.0.1"
+
+
+def allowed_dashboard_hosts() -> frozenset[str]:
+    """Host header names accepted when the proxy is reachable off-loopback."""
+    raw = config_value("USOC_DASHBOARD_ALLOWED_HOSTS", "") or ""
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def bind_address() -> str:
+    """Fail closed if a non-loopback bind has no Host allowlist.
+
+    A proxy reachable through a Service must know which names it serves;
+    otherwise a DNS-rebinding attack could make a browser use it as a confused
+    deputy. Local development keeps the historical loopback default.
+    """
+    host = dashboard_host()
+    if host not in LOOPBACK_HOSTS and not allowed_dashboard_hosts():
+        raise RuntimeError(
+            "USOC_DASHBOARD_ALLOWED_HOSTS must name the proxy's Service/Ingress "
+            "hosts when USOC_DASHBOARD_HOST is not a loopback address"
+        )
+    return host
+
+
 def config_value(name: str, default: str | None = None) -> str | None:
     """Read a setting from the environment, then .env, then use the default.
 
@@ -145,9 +172,17 @@ class Handler(BaseHTTPRequestHandler):
             host = urlsplit(f"//{raw}").hostname
         except ValueError:
             return False
+        if not host:
+            return False
+        # A cluster Service name is only accepted when it was explicitly
+        # configured, and only with that exact name (optionally with a port).
+        declared = raw.lower()
+        for name in allowed_dashboard_hosts():
+            if declared == name or declared.startswith(f"{name}:"):
+                return True
         if host in LOOPBACK_HOSTS:
-            declared = raw.rsplit(":", 1)[0] if ":" in raw else raw
-            return not declared or declared in ("127.0.0.1", "localhost", "[::1]")
+            declared_host = raw.rsplit(":", 1)[0] if ":" in raw else raw
+            return not declared_host or declared_host in ("127.0.0.1", "localhost", "[::1]")
         return host == "127.0.0.1" and raw.endswith(f":{port}")
 
     def respond(self, status, body, content_type):
@@ -197,8 +232,9 @@ class DashboardHTTPServer(ThreadingHTTPServer):
 
 if __name__ == "__main__":
     port = int(os.environ.get("USOC_DASHBOARD_PORT", "8090"))
-    server = DashboardHTTPServer(("127.0.0.1", port), Handler)
-    print(f"USOC dashboard: http://127.0.0.1:{port}", flush=True)
+    host = bind_address()  # non-loopback binds require an explicit Host allowlist
+    server = DashboardHTTPServer((host, port), Handler)
+    print(f"USOC dashboard: http://{host}:{port}", flush=True)
     try:
         server.serve_forever()
     finally:
