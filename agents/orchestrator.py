@@ -224,6 +224,7 @@ class Orchestrator:
         resolved: bool | None = None,
         latency_ms: int | None = None,
         reason: str | BaseException | None = None,
+        tenant_id: str = "default",
     ) -> None:
         if self.ledger is None:
             return
@@ -236,6 +237,7 @@ class Orchestrator:
                 resolved=resolved,
                 latency_ms=latency_ms,
                 reason=reason,
+                tenant_id=tenant_id,
             )
         except Exception:  # pragma: no cover - observation must not change control flow
             log("ledger.record_failed", state=state)
@@ -284,12 +286,20 @@ class Orchestrator:
                 except asyncio.TimeoutError:
                     pass
 
-    async def run(self, goal: str) -> GoalResult:
-        trace_id = new_trace()
+    async def run(
+        self,
+        goal: str,
+        *,
+        idempotency_key: str | None = None,
+        tenant_id: str = "default",
+    ) -> GoalResult:
+        # A supplied idempotency key seeds the trace so step tokens are stable
+        # across a replay; without one the legacy random trace is preserved.
+        trace_id = idempotency_key[:16] if idempotency_key else new_trace()
         started = time.perf_counter()
         with trace(trace_id):
-            log("goal.start", goal=goal)
-            self._ledger_record(trace_id, "goal_accepted")
+            log("goal.start", goal=goal, tenant_id=tenant_id)
+            self._ledger_record(trace_id, "goal_accepted", tenant_id=tenant_id)
             try:
                 plan = await asyncio.wait_for(self.planner.plan(goal), timeout=self.settings.plan_timeout_s)
             except Exception as exc:
@@ -299,17 +309,23 @@ class Orchestrator:
                     fingerprint=error_fingerprint(exc),
                     error=repr(exc),
                 )
-                return await self._fail_plan(goal, trace_id, started, exc)
+                return await self._fail_plan(goal, trace_id, started, exc, tenant_id=tenant_id)
 
             await self.bus.publish(
                 Message.event(sender=self.id, name="plan.created", correlation_id=trace_id, data={"steps": len(plan.steps)})
             )
             log("goal.planned", steps=len(plan.steps), plan=[(s.id, s.agent) for s in plan.steps])
-            self._ledger_record(trace_id, "goal_planned")
+            self._ledger_record(trace_id, "goal_planned", tenant_id=tenant_id)
             return await self._execute(plan, trace_id, started)
 
     async def _fail_plan(
-        self, goal: str, trace_id: str, started: float, exc: BaseException
+        self,
+        goal: str,
+        trace_id: str,
+        started: float,
+        exc: BaseException,
+        *,
+        tenant_id: str = "default",
     ) -> GoalResult:
         """Give planner outages the same metrics and bus event as other failures."""
         self.metrics.inc("goal.failed")
@@ -317,7 +333,7 @@ class Orchestrator:
         self.metrics.observe("goal.duration_ms", elapsed)
         self._ledger_record(
             trace_id, "goal_failed", ok=False, resolved=False,
-            latency_ms=elapsed, reason=exc,
+            latency_ms=elapsed, reason=exc, tenant_id=tenant_id,
         )
         reason = f"plan: {type(exc).__name__}: {exc}"
         log(

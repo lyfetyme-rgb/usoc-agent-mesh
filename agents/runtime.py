@@ -151,6 +151,7 @@ class BaseAgent:
         evidence: EvidenceChain | None = None,
         approvals: Any | None = None,
         ledger: TaskLedger | None = None,
+        bengal_engine: Any | None = None,
     ) -> None:
         self.spec = spec
         self.id = spec.id
@@ -165,6 +166,7 @@ class BaseAgent:
         self.evidence = evidence
         self.approvals = approvals
         self.ledger = ledger
+        self.bengal_engine = bengal_engine
         self.pending = Pending()
         self._in_flight: set[str] = set()
         self._sem = asyncio.Semaphore(settings.max_concurrency)

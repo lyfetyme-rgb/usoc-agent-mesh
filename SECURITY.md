@@ -1009,6 +1009,13 @@ steps in the sections above.
   metadata and withholds `trusted_for_execution`, but it does not semantically
   prove that a governed action actually happened. Keep external execution
   audit independent of the evidence chain.
+* BENGAL's BAA analyzers are advisory heuristics, not proofs. The offline paths
+  are lexical/statistical; an injected LLM only enriches perspective induction.
+  They cannot prove the absence of bias, hallucination or poisoning. The
+  sanitization manifest binds a redaction mapping to a configured secret and
+  does not replace a DLP control, and the T&E corpus is small and calibrated to
+  the analyzer rules, so its confidence bounds are wide. BAA output never
+  enters the policy decision path and never authorizes a governed action.
 * Shadow mode suppresses execution, mutating tools and egress in-process; it is
   not a network-level sandbox. A compromised dependency that bypasses the agent
   runtime entirely could still make outbound connections. Deploy shadow nodes

@@ -9,6 +9,8 @@
     python -m agents llm-rehearsal                   # offline LLM/policy rehearsal (no egress)
     python -m agents llm-rehearsal --live            # opt into AGENT_LLM_BASE_URL model egress
     python -m agents benchmark                       # adaptive governance-readiness benchmark
+    python -m agents bengal-eval                     # BENGAL BAA T&E metrics + confidence bounds
+    python -m agents bengal-analyze case.json        # four BAA analyzers, redacted output
     python -m agents export --format oekp_bengal --output exports/
     python -m agents doctor
     python -m agents integrity
@@ -398,6 +400,51 @@ async def _run_benchmark(args: argparse.Namespace) -> int:
         report.variants[report.best].score if report.best in report.variants else 0.0
     )
     return 0 if report.hard_pass and best_score >= float(args.min_score) else 1
+
+
+async def _run_bengal_eval(args: argparse.Namespace) -> int:
+    """Run the fixed, replicable BENGAL BAA T&E corpus and print its metrics."""
+    from .bengal import BengalEngine
+    from .bengal_eval import load_cases, run_eval
+
+    settings = _settings(args)
+    cases_path = Path(args.cases or settings.bengal_eval_cases)
+    if not cases_path.is_file():
+        print(f"bengal-eval: no such cases file: {cases_path}", file=sys.stderr)
+        return 1
+    try:
+        cases = load_cases(cases_path)
+    except (OSError, ValueError) as exc:
+        print(f"bengal-eval: {exc}", file=sys.stderr)
+        return 1
+    report = await run_eval(
+        cases, BengalEngine(secret=settings.shared_secret or ""), model_id=args.model_id or "offline"
+    )
+    payload = json.loads(report.model_dump_json())
+    text = json.dumps(payload, indent=2, sort_keys=True)
+    print(text)
+    if getattr(args, "output", None):
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+        print(f"bengal-eval report: {out}", file=sys.stderr)
+    return 0 if report.verified and report.macro_f1 >= float(args.min_f1) else 1
+
+
+async def _run_bengal_analyze(args: argparse.Namespace) -> int:
+    """Analyze one BENGAL case from a JSON file; output is redacted by design."""
+    from .bengal import BengalCase, BengalEngine
+
+    settings = _settings(args)
+    try:
+        raw = json.loads(Path(args.case).read_text(encoding="utf-8")) if args.case != "-" else json.load(sys.stdin)
+        case = BengalCase.model_validate(raw)
+    except (OSError, ValueError) as exc:
+        print(f"bengal-analyze: {exc}", file=sys.stderr)
+        return 1
+    report = await BengalEngine(secret=settings.shared_secret or "").analyze(case)
+    print(json.dumps(json.loads(report.model_dump_json()), indent=2, sort_keys=True))
+    return 0
 
 
 def _approval_store(settings: Settings, signer=None) -> FileApprovalStore:
@@ -980,6 +1027,20 @@ async def _run_serve(args: argparse.Namespace) -> int:
                     "health": await mesh.shell.health(detailed=True),
                     "issues": await mesh.shell.diagnostics(),
                     "discovery": mesh.shell.discovery(),
+                    "bengal": {
+                        **mesh.describe()["bengal"],
+                        "eval_protocol": "bengal-eval/v1",
+                        "eval_cases": str(settings.bengal_eval_cases),
+                        "thresholds": {
+                            "grounded_min": settings.bengal_grounded_min,
+                            "plausible_min": settings.bengal_plausible_min,
+                            "min_independent_sources": settings.bengal_min_independent_sources,
+                            "corroboration_min": settings.bengal_corroboration_min,
+                            "k_anonymity": settings.bengal_k_anonymity,
+                            "review_at": settings.bengal_review_at,
+                            "block_at": settings.bengal_block_at,
+                        },
+                    },
                 }
             )
 
@@ -1396,6 +1457,22 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument(
         "--min-score", type=float, default=95.0, help="minimum score for exit 0 (default: 95)"
     )
+    bengal_eval = sub.add_parser(
+        "bengal-eval",
+        help="BENGAL BAA T&E: fixed labeled corpus, per-mode metrics with confidence bounds",
+    )
+    bengal_eval.add_argument(
+        "--cases", help="JSONL labeled cases (default: AGENT_BENGAL_EVAL_CASES)"
+    )
+    bengal_eval.add_argument("--model-id", default="offline", help="model family/version under test")
+    bengal_eval.add_argument("--output", help="write the JSON report to this path")
+    bengal_eval.add_argument(
+        "--min-f1", type=float, default=0.0, help="minimum macro F1 for exit 0 (default: 0)"
+    )
+    bengal_analyze = sub.add_parser(
+        "bengal-analyze", help="run the four BAA analyzers on one JSON case (redacted output)"
+    )
+    bengal_analyze.add_argument("case", help="path to a BENGAL case JSON file, or - for stdin")
     integrity = sub.add_parser(
         "integrity", help="print or verify the capability-card manifest hash/signature"
     )
@@ -1573,6 +1650,10 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_run_llm_rehearsal(args))
         if args.command == "benchmark":
             return asyncio.run(_run_benchmark(args))
+        if args.command == "bengal-eval":
+            return asyncio.run(_run_bengal_eval(args))
+        if args.command == "bengal-analyze":
+            return asyncio.run(_run_bengal_analyze(args))
     except KeyboardInterrupt:
         return 130
     return 2

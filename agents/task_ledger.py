@@ -20,11 +20,22 @@ import hashlib
 import re
 import time
 from collections import Counter, deque
-from typing import Any, Callable, Literal, get_args
+from typing import Any, Callable, Literal, Protocol, get_args, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .security import redact_text
+
+
+@runtime_checkable
+class LedgerSink(Protocol):
+    """Observation-only write-through target; failures never affect execution."""
+
+    def emit(self, event: "TaskEvent") -> None: ...
+
+    def snapshot(self) -> dict[str, Any]: ...
+
+    async def flush(self) -> None: ...
 
 TaskState = Literal[
     "received",
@@ -44,6 +55,8 @@ TaskState = Literal[
     "goal_planned",
     "goal_completed",
     "goal_failed",
+    "goal_error",
+    "bengal_analyzed",
 ]
 
 Resolved: dict[str, bool | None] = {
@@ -60,6 +73,8 @@ Resolved: dict[str, bool | None] = {
     "deadline": False,
     "sender_denied": False,
     "goal_failed": False,
+    "goal_error": False,
+    "bengal_analyzed": True,
     "received": None,
     "retried": None,
     "goal_accepted": None,
@@ -80,6 +95,8 @@ Successful: dict[str, bool | None] = {
     "deadline": False,
     "sender_denied": False,
     "goal_failed": False,
+    "goal_error": False,
+    "bengal_analyzed": True,
     "received": None,
     "retried": None,
     "goal_accepted": None,
@@ -101,6 +118,7 @@ class TaskEvent(BaseModel):
     event_id: str
     trace_id: str
     agent_id: str
+    tenant_id: str = "default"
     step_id: str | None = None
     state: TaskState
     attempt: int = Field(default=0, ge=0)
@@ -111,7 +129,7 @@ class TaskEvent(BaseModel):
     reason_fingerprint: str | None = None
     ts: float
 
-    @field_validator("trace_id", "agent_id")
+    @field_validator("trace_id", "agent_id", "tenant_id")
     @classmethod
     def _bounded_id(cls, value: str) -> str:
         if not value or len(value) > 64:
@@ -143,6 +161,9 @@ class TaskLedger:
         ttl_s: float = 3600.0,
         recent_limit: int = 20,
         clock: Callable[[], float] = time.monotonic,
+        sink: LedgerSink | None = None,
+        archive: Any | None = None,
+        tenant_id: str = "default",
     ) -> None:
         if max_events < 1:
             raise ValueError("max_events must be positive")
@@ -154,6 +175,10 @@ class TaskLedger:
         self.ttl_s = ttl_s
         self.recent_limit = recent_limit
         self._clock = clock
+        self.sink = sink
+        self.archive = archive
+        self.tenant_id = tenant_id
+        self.sink_errors = 0
         self._events: deque[TaskEvent] = deque()
         self._seq = 0
         self._dropped = 0
@@ -173,6 +198,7 @@ class TaskLedger:
         latency_ms: int | None = None,
         tokens: int = 0,
         reason: str | BaseException | None = None,
+        tenant_id: str | None = None,
     ) -> TaskEvent:
         """Append one transition. Raw reason text is hashed, never retained."""
         if state not in get_args(TaskState):
@@ -192,6 +218,7 @@ class TaskLedger:
             event_id=f"evt-{self._seq}",
             trace_id=trace[:64] or "-",
             agent_id=agent_id[:64] or "-",
+            tenant_id=(tenant_id or self.tenant_id)[:64] or "default",
             step_id=step[:64] if step else None,
             state=state,  # type: ignore[arg-type]
             attempt=max(0, int(attempt)),
@@ -206,7 +233,52 @@ class TaskLedger:
             self._events.popleft()
             self._dropped += 1
         self._events.append(event)
+        self._emit(event)
         return event
+
+    def _emit(self, event: TaskEvent) -> None:
+        """Mirror to configured sinks; telemetry failures never break work."""
+        for sink in (self.sink, self.archive):
+            if sink is None:
+                continue
+            try:
+                sink.emit(event)
+            except Exception:  # pragma: no cover - observation must stay passive
+                self.sink_errors += 1
+
+    async def flush(self) -> None:
+        """Drain asynchronous sink writes (hot Redis and cold signed archive)."""
+        for sink in (self.sink, self.archive):
+            if sink is not None and hasattr(sink, "flush"):
+                try:
+                    await sink.flush()
+                except Exception:  # pragma: no cover - observation must stay passive
+                    self.sink_errors += 1
+
+    async def query(
+        self,
+        *,
+        tenant_id: str | None = None,
+        trace_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Read through the durable sink when present, otherwise local events."""
+        if self.sink is not None and hasattr(self.sink, "query"):
+            try:
+                return await self.sink.query(
+                    tenant_id=tenant_id, trace_id=trace_id, status=status, limit=limit
+                )
+            except Exception:  # pragma: no cover
+                self.sink_errors += 1
+        matches = [
+            event.model_dump()
+            for event in self._events
+            if (tenant_id is None or event.tenant_id == tenant_id)
+            and (trace_id is None or event.trace_id == trace_id)
+            and (status is None or event.state == status)
+        ]
+        return matches[-max(0, limit) :] if limit else matches
 
     def _sweep(self) -> None:
         cutoff = self._clock() - self.ttl_s
@@ -238,6 +310,13 @@ class TaskLedger:
             "expired": self._expired,
             "states": dict(sorted(Counter(event.state for event in events).items())),
             "by_agent": dict(sorted(Counter(event.agent_id for event in events).items())),
+            "tenants": dict(sorted(Counter(event.tenant_id for event in events).items())),
+            "storage": (
+                self.sink.snapshot()
+                if self.sink is not None and hasattr(self.sink, "snapshot")
+                else {"backend": "memory"}
+            ),
+            "sink_errors": self.sink_errors,
             **counts,
             "resolved": counts["tasks_resolved"],
             "unresolved": counts["tasks_unresolved"],

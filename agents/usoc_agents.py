@@ -5,7 +5,7 @@ different on purpose: their core duty must not be probabilistic.
 
 * SERAPHIM  -> policy decision point (deterministic engine)
 * OEKP      -> append-only evidence writer (hash chain)
-* BENGAL    -> independent verification (recomputes the chain)
+* BENGAL    -> independent verification + BENGAL BAA threat-mode analysis
 * HITL      -> human approval queue (creates Handoff, never self-approves)
 
 CYBER DEFENSE keeps the LLM path but its runtime gate hard-denies prohibited
@@ -27,10 +27,12 @@ from .contracts import (
     TaskResult,
     TaskSpec,
 )
+from .bengal import BengalCase, BengalEngine, SourceDocument, ThreatMode
 from .evidence import sandbox_origin
 from .governance import ApprovalRequest, taint_disclosure_hash
 from .runtime import SubsystemAgent
 from .observability import log
+from .task_ledger import reason_fingerprint
 
 
 class AiceeAgent(SubsystemAgent):
@@ -232,11 +234,66 @@ class OekpAgent(SubsystemAgent):
 
 
 class BengalAgent(SubsystemAgent):
-    """Independent verification: recomputes the evidence chain from disk."""
+    """Independent assurance and IARPA BENGAL BAA threat-mode analysis.
+
+    Default behaviour is unchanged: recompute the evidence chain from disk and
+    withhold execution trust. When a caller supplies ``bengal_analyze`` inputs,
+    the deterministic BENGAL engine also runs the four BAA topic analyzers and
+    returns a redacted report. It never approves, denies or executes anything.
+    """
 
     deterministic = True
 
+    async def _analyze_baa(self, spec: TaskSpec, msg: Message) -> TaskResult | Failure:
+        engine: BengalEngine | None = getattr(self, "bengal_engine", None)
+        if engine is None:
+            return Failure(code="bengal_engine_unavailable", message="BENGAL analyzer not configured")
+        inputs = spec.inputs
+        requested = inputs.get("bengal_analyze", True)
+        if isinstance(requested, (list, tuple)):
+            modes = tuple(ThreatMode(str(m)) for m in requested)
+        else:
+            modes = tuple(ThreatMode)
+        try:
+            sources = tuple(
+                SourceDocument.model_validate(item) for item in inputs.get("sources", ())
+            )
+            case = BengalCase(
+                case_id=str(inputs.get("case_id") or msg.correlation_id or "bengal"),
+                tenant_id=str(spec.tenant_id or "default"),
+                text=str(inputs.get("text") or spec.objective),
+                trusted_corpus=tuple(str(v) for v in inputs.get("trusted_corpus", ())),
+                claims=tuple(str(v) for v in inputs.get("claims", ())),
+                sources=sources,
+                perspectives=tuple(str(v) for v in inputs.get("perspectives", ())),
+                records=tuple(dict(v) for v in inputs.get("records", ())),
+                query=str(inputs.get("query") or ""),
+                response=str(inputs.get("response") or ""),
+            )
+            report = await engine.analyze(case, modes=modes)
+        except Exception as exc:
+            # Exception text can echo raw inputs (e.g. pydantic value errors).
+            # Keep only an opaque fingerprint out of the ledger and evidence.
+            self.metrics.inc("bengal.analysis_error")
+            return Failure(
+                code="bengal_analysis_error",
+                message=f"{type(exc).__name__}: {reason_fingerprint(str(exc))}",
+            )
+
+        self.metrics.inc("bengal.analysis")
+        summary = report.summary()
+        return TaskResult(
+            ok=True,
+            output=(
+                f"BENGAL BAA analysis: severity={summary['severity']}, "
+                f"modes={','.join(summary['modes'])}"
+            ),
+            data={"bengal": report.model_dump(mode="json"), **summary},
+        )
+
     async def handle_task(self, spec: TaskSpec, msg: Message) -> TaskResult | Handoff | Failure:
+        if spec is not None and spec.inputs.get("bengal_analyze"):
+            return await self._analyze_baa(spec, msg)
         if self.evidence is None:
             return Failure(code="bengal_unavailable", message="evidence chain not configured")
         ok, detail = self.evidence.verify()

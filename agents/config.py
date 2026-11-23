@@ -227,6 +227,32 @@ class Settings(BaseSettings):
     plan_timeout_s: float = 90.0
     max_tokens_per_step: int = 8_000
 
+    # edge ingress and deterministic idempotency
+    ingress_require_tenant: bool = False
+    ingress_quarantine_max: int = 256
+    idempotency_ttl_s: int = 86_400
+
+    # resilience: fail-fast breakers and jittered retries for external calls
+    circuit_failure_threshold: int = 5
+    circuit_reset_s: float = 30.0
+    retry_jitter: bool = True
+
+    # durable task state: hot Redis tier and signed cold archive
+    ledger_backend: Literal["memory", "redis"] = "memory"
+    ledger_hot_ttl_s: int = 86_400
+    ledger_archive_path: Path | None = None
+
+    # BENGAL BAA threat-mode analysis (IARPA BAA-24-03)
+    bengal_eval_cases: Path = Path("fixtures/bengal/cases.jsonl")
+    bengal_grounded_min: float = 0.6
+    bengal_plausible_min: float = 0.25
+    bengal_min_independent_sources: int = 2
+    bengal_corroboration_min: float = 0.5
+    bengal_k_anonymity: int = 3
+    bengal_review_at: float = 0.5
+    bengal_block_at: float = 0.8
+    bengal_simulate_dialogue: bool = True
+
     # files
     subsystems_file: Path = Path("subsystems.yaml")
     workspace: Path = Path("workspace")

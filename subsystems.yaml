@@ -213,6 +213,9 @@ subsystems:
       Independent assurance, resilience and verification. Checks architecture,
       requirements, models, resilience and security controls, and independently
       validates outcomes against evidence. It stays independent of what it tests.
+      Also runs the IARPA BENGAL BAA threat-mode analyzers (bias/diverse
+      perspectives, hallucination/inference/confidence, safe information flow,
+      poisoned/imperfect sources) as observation-only, redacted assessments.
     capabilities:
       - verify outcomes independently
       - assess resilience and fault tolerance
@@ -221,6 +224,10 @@ subsystems:
       - measure performance and reliability
       - verify evidence integrity
       - report assurance findings
+      - quantify bias and diverse perspectives
+      - detect spurious hallucinations with confidence
+      - assess safe information flow and redaction
+      - resist poisoned and imperfect sources
     keywords:
       - assurance
       - independent
@@ -230,6 +237,11 @@ subsystems:
       - reliability
       - acceptance criteria
       - evidence integrity
+      - bias
+      - hallucination
+      - safe information flow
+      - poisoned sources
+      - confidence
     roles:
       - Architecture Assurance Agent
       - Requirements Verification Agent
@@ -249,7 +261,9 @@ subsystems:
       You are BENGAL, the independent assurance subsystem. Verify against evidence,
       not against assertions. Report failed checks and missing evidence plainly;
       never soften a result to satisfy a delivery target. You are independent of
-      the components you evaluate.
+      the components you evaluate. BAA threat-mode analyses are observation-only:
+      emit redacted scores, counts and fingerprints, never raw payloads, and never
+      approve, deny or execute a governed action.
 
   - id: csssf
     name: CSSSF

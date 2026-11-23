@@ -126,6 +126,11 @@ function applyValues(data) {
   set("configured", RESTRICTED);
   set("connectors", RESTRICTED);
   set("connector-note", "Detailed connector and topology data requires authenticated diagnostics access; it is not published by the health endpoints.");
+  const bengal = health?.bengal;
+  const bengalOn = bengal?.enabled === true;
+  set("bengal-method", bengalOn ? (bengal.method_version ?? UNKNOWN) : RESTRICTED);
+  set("bengal-modes", bengalOn && Array.isArray(bengal.modes) ? bengal.modes.length : RESTRICTED);
+  set("bengal-protocol", bengalOn ? (bengal.protocol_version ?? UNKNOWN) : RESTRICTED);
 }
 
 function rememberGood(data) {
@@ -148,7 +153,7 @@ function markFailure(reason) {
   }
   setSync(`OFFLINE · ${reasonLabel(reason)}`, "bad");
   set("updated", `Status unavailable · retry ${failures}`);
-  for (const id of ["platform","bus","auth","connector-status","agents","roles","pending","runtime","transport","missing","connectors","configured"]) set(id, UNKNOWN);
+  for (const id of ["platform","bus","auth","connector-status","agents","roles","pending","runtime","transport","missing","connectors","configured","bengal-method","bengal-modes","bengal-protocol"]) set(id, UNKNOWN);
   set("ready-tag", UNKNOWN);
   set("connector-note", "Unable to contact the mesh health service.");
 }
