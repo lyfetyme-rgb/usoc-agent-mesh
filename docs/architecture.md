@@ -452,6 +452,31 @@ candidates, so a wrong assignment is a one-line investigation.
 Swap `Metrics` for Prometheus/OTel at the composition root; nothing else needs
 to change.
 
+## 9a. Task ledger and adaptive benchmark (0.2.0)
+
+`TaskLedger` is the missing middle layer between counters and traces. It keeps a
+bounded, TTL-swept record of each lifecycle transition, correlated by the same
+`trace_id:step_id` used by the orchestrator and agents. It stores no goal, output
+or error text: reasons become 16-hex digests of redacted text, and
+`extra="forbid"` rejects any attempt to add a free-text field. `Shell.health`
+publishes only counts on the public probe; the full snapshot requires the
+admin-gated diagnostics route.
+
+`agents benchmark` applies the paper's lesson that an optimizer can change the
+method but never the definition of success:
+
+* **Fixed validator** — the real deterministic `PolicyEngine` plus hard
+  invariants (`unapproved_allow`, `policy_ref_missing`, verified chain, shadow
+  flags, bounded rounds). Variants cannot redefine them.
+* **Evidence-backed archive** — each case, round and summary is appended to a
+  signed hash chain with a fresh run id and per-record nonce.
+* **Adaptive focus** — a variant's next round contains only cases it has not
+  resolved; the loop stops when the residual set is stable, so compute is not
+  spent re-proving solved cases.
+* **Proposal only** — the report is permanently `rehearsal_only` / `shadow`,
+  uses an isolated in-memory approval store, and never promotes a variant. A
+  human still owns the merge decision.
+
 ## 10. Security boundaries
 
 * **Tools are the boundary.** An agent can only call tools named on its card;

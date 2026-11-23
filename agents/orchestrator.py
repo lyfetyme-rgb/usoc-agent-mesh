@@ -43,6 +43,7 @@ from .contracts import (
 )
 from .llm import EchoLLM, LLM, extract_json
 from .observability import Metrics, error_fingerprint, log, new_trace, trace
+from .task_ledger import TaskLedger
 from .registry import Registry, RegistryError, tokens
 
 PLANNER_SYSTEM = """You plan work for a mesh of {count} subsystem agents.
@@ -200,6 +201,7 @@ class Orchestrator:
         settings: Settings,
         metrics: Metrics,
         mission_id: str | None = None,
+        ledger: TaskLedger | None = None,
     ) -> None:
         self.bus = bus
         self.registry = registry
@@ -207,10 +209,36 @@ class Orchestrator:
         self.settings = settings
         self.metrics = metrics
         self.mission_id = mission_id
+        self.ledger = ledger
         self.id = "orchestrator"
         self._pending: dict[str, asyncio.Future] = {}
         self._pump_task: asyncio.Task | None = None
         self._stopping = asyncio.Event()
+
+    def _ledger_record(
+        self,
+        trace_id: str,
+        state: str,
+        *,
+        ok: bool | None = None,
+        resolved: bool | None = None,
+        latency_ms: int | None = None,
+        reason: str | BaseException | None = None,
+    ) -> None:
+        if self.ledger is None:
+            return
+        try:
+            self.ledger.record(
+                agent_id=self.id,
+                state=state,
+                correlation_id=trace_id,
+                ok=ok,
+                resolved=resolved,
+                latency_ms=latency_ms,
+                reason=reason,
+            )
+        except Exception:  # pragma: no cover - observation must not change control flow
+            log("ledger.record_failed", state=state)
 
     async def start(self) -> None:
         await self.bus.subscribe(self.id, [])
@@ -261,6 +289,7 @@ class Orchestrator:
         started = time.perf_counter()
         with trace(trace_id):
             log("goal.start", goal=goal)
+            self._ledger_record(trace_id, "goal_accepted")
             try:
                 plan = await asyncio.wait_for(self.planner.plan(goal), timeout=self.settings.plan_timeout_s)
             except Exception as exc:
@@ -276,6 +305,7 @@ class Orchestrator:
                 Message.event(sender=self.id, name="plan.created", correlation_id=trace_id, data={"steps": len(plan.steps)})
             )
             log("goal.planned", steps=len(plan.steps), plan=[(s.id, s.agent) for s in plan.steps])
+            self._ledger_record(trace_id, "goal_planned")
             return await self._execute(plan, trace_id, started)
 
     async def _fail_plan(
@@ -285,6 +315,10 @@ class Orchestrator:
         self.metrics.inc("goal.failed")
         elapsed = int((time.perf_counter() - started) * 1000)
         self.metrics.observe("goal.duration_ms", elapsed)
+        self._ledger_record(
+            trace_id, "goal_failed", ok=False, resolved=False,
+            latency_ms=elapsed, reason=exc,
+        )
         reason = f"plan: {type(exc).__name__}: {exc}"
         log(
             "goal.failed",
@@ -413,6 +447,9 @@ class Orchestrator:
         elapsed = int((time.perf_counter() - started) * 1000)
         self.metrics.inc("goal.completed")
         self.metrics.observe("goal.duration_ms", elapsed)
+        self._ledger_record(
+            trace_id, "goal_completed", ok=True, resolved=True, latency_ms=elapsed
+        )
         log("goal.done", steps=len(results), tokens=total_tokens, ms=elapsed)
         await self.bus.publish(
             Message.event(
@@ -553,8 +590,13 @@ class Orchestrator:
         results: dict[str, TaskResult],
         reason: str,
     ) -> GoalResult:
+        elapsed = int((time.perf_counter() - started) * 1000)
         self.metrics.inc("goal.failed")
-        self.metrics.observe("goal.duration_ms", int((time.perf_counter() - started) * 1000))
+        self.metrics.observe("goal.duration_ms", elapsed)
+        self._ledger_record(
+            trace_id, "goal_failed", ok=False, resolved=False,
+            latency_ms=elapsed, reason=reason,
+        )
         log("goal.failed", reason=reason)
         owners = {step.id: step.agent for step in plan.steps}
         kinds = {

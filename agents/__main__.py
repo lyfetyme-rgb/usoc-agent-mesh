@@ -8,6 +8,7 @@
     python -m agents storyboard --vertical finance  # 3-minute Money Shot storyboard
     python -m agents llm-rehearsal                   # offline LLM/policy rehearsal (no egress)
     python -m agents llm-rehearsal --live            # opt into AGENT_LLM_BASE_URL model egress
+    python -m agents benchmark                       # adaptive governance-readiness benchmark
     python -m agents export --format oekp_bengal --output exports/
     python -m agents doctor
     python -m agents integrity
@@ -340,6 +341,63 @@ async def _run_llm_rehearsal(args: argparse.Namespace) -> int:
         )
         print(f"evidence export: {dest}")
     return 0
+
+
+async def _run_benchmark(args: argparse.Namespace) -> int:
+    """Score fixed governance variants, focus on residual failures, archive lineage."""
+    from .benchmark import load_cases, run_benchmark
+    from .evidence import render_export
+    from .governance import InMemoryApprovalStore, PolicyConfig, PolicyEngine
+
+    args.shadow = True  # isolated workspace, no bridges, no live nonce
+    settings = _settings(args)
+    cases_path = Path(args.cases)
+    if not cases_path.is_file():
+        print(f"benchmark: no such cases file: {cases_path}", file=sys.stderr)
+        return 1
+    try:
+        cases = load_cases(cases_path)
+    except (OSError, ValueError) as exc:
+        print(f"benchmark: {exc}", file=sys.stderr)
+        return 1
+
+    evidence = EvidenceChain(
+        settings.workspace / "evidence" / "benchmark.jsonl", signer=_signer(settings)
+    )
+    # A fresh in-memory approval store: the benchmark can never consume or
+    # mutate the store used by a running mesh.
+    policy = PolicyEngine(
+        PolicyConfig(
+            allowed_targets=[
+                item.strip() for item in settings.allowed_targets.split(",") if item.strip()
+            ],
+            egress_target=None,
+        ),
+        InMemoryApprovalStore(),
+    )
+    report = await run_benchmark(
+        settings=settings,
+        evidence=evidence,
+        policy=policy,
+        cases=cases,
+        adaptive=not getattr(args, "full", False),
+        max_rounds=max(1, int(getattr(args, "rounds", 3))),
+    )
+    print(json.dumps(json.loads(report.model_dump_json()), indent=2, sort_keys=True))
+    if getattr(args, "output", None):
+        out = Path(args.output)
+        out.mkdir(parents=True, exist_ok=True)
+        ok, detail = evidence.verify()
+        dest = out / "evidence.oekp-bengal.json"
+        dest.write_text(
+            render_export(evidence.records(), "oekp_bengal", verified=ok, detail=detail),
+            encoding="utf-8",
+        )
+        print(f"evidence export: {dest}")
+    best_score = (
+        report.variants[report.best].score if report.best in report.variants else 0.0
+    )
+    return 0 if report.hard_pass and best_score >= float(args.min_score) else 1
 
 
 def _approval_store(settings: Settings, signer=None) -> FileApprovalStore:
@@ -1319,6 +1377,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow AGENT_LLM_BASE_URL model egress (default: offline EchoLLM, no network)",
     )
+    benchmark = sub.add_parser(
+        "benchmark",
+        help="adaptive governance-readiness benchmark (observation only, signed evidence)",
+    )
+    benchmark.add_argument(
+        "--cases",
+        default=str(Path("fixtures") / "benchmark" / "cases.jsonl"),
+        help="JSONL file of labeled benchmark scenarios",
+    )
+    benchmark.add_argument("--output", help="directory for an oekp_bengal evidence export")
+    benchmark.add_argument(
+        "--full", action="store_true", help="evaluate all cases every round (no adaptive focus)"
+    )
+    benchmark.add_argument(
+        "--rounds", type=int, default=3, help="maximum adaptive rounds (default: 3)"
+    )
+    benchmark.add_argument(
+        "--min-score", type=float, default=95.0, help="minimum score for exit 0 (default: 95)"
+    )
     integrity = sub.add_parser(
         "integrity", help="print or verify the capability-card manifest hash/signature"
     )
@@ -1494,6 +1571,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_run_fragmentation_demo(args))
         if args.command == "llm-rehearsal":
             return asyncio.run(_run_llm_rehearsal(args))
+        if args.command == "benchmark":
+            return asyncio.run(_run_benchmark(args))
     except KeyboardInterrupt:
         return 130
     return 2
