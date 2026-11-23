@@ -5,13 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from agents import security
 from agents.bus import InMemoryBus
 from agents.connectors import ConnectorBatch, SourceType, ingest_connectors
 from agents.contracts import ErrorCode, Message
+from agents.evidence import EvidenceChain, EvidenceRecord
 from agents.governance import ActionClass, ApprovalRequest, FileApprovalStore
 from agents.llm import EchoLLM, OpenAICompatibleLLM
 from agents.observability import (
@@ -377,3 +383,67 @@ async def test_health_server_logs_internal_errors_without_leaking_secrets(caplog
     rendered = JsonFormatter().format(record)
     assert "abc123" not in rendered
     assert "RuntimeError" in rendered
+
+
+@pytest.mark.asyncio
+async def test_evidence_tail_reads_one_record_not_whole_chain(tmp_path, monkeypatch):
+    chain = EvidenceChain(tmp_path / "evidence.jsonl")
+    for i in range(25):
+        await chain.append(kind="test", actor="tester", data={"i": i})
+
+    parsed = 0
+    original = EvidenceRecord.model_validate_json
+
+    def counting(line):
+        nonlocal parsed
+        parsed += 1
+        return original(line)
+
+    monkeypatch.setattr(EvidenceRecord, "model_validate_json", counting)
+    seq, digest = chain._tail()
+    assert seq == 25
+    assert digest == chain._last_hash
+    assert parsed == 1
+
+
+@pytest.mark.asyncio
+async def test_evidence_tail_handles_record_larger_than_scan_block(tmp_path):
+    chain = EvidenceChain(tmp_path / "evidence.jsonl")
+    record = await chain.append(
+        kind="test.large", actor="tester", data={"blob": "x" * 12_000}
+    )
+    assert chain._tail() == (record.seq, record.hash)
+    ok, _ = chain.verify()
+    assert ok
+
+
+@pytest.mark.asyncio
+async def test_async_exclusive_lock_keeps_event_loop_responsive(tmp_path, monkeypatch):
+    gate = threading.Event()
+
+    @contextmanager
+    def slow_lock(_path, timeout_s=10.0):
+        gate.set()
+        time.sleep(0.2)
+        yield
+
+    monkeypatch.setattr(security, "exclusive_lock", slow_lock)
+
+    async def holder():
+        async with security.async_exclusive_lock(tmp_path / "state.json"):
+            await asyncio.sleep(0.01)
+
+    task = asyncio.create_task(holder())
+    await asyncio.to_thread(gate.wait, 2)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await asyncio.sleep(0.01)
+    assert loop.time() - started < 0.08
+    await task
+
+
+def test_file_approval_store_uses_non_blocking_locks():
+    source = Path(__file__).resolve().parents[1] / "agents" / "governance.py"
+    text = source.read_text(encoding="utf-8")
+    assert text.count("async with async_exclusive_lock(self.path):") >= 3
+    assert "with exclusive_lock(" not in text

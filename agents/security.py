@@ -16,6 +16,7 @@ This module is deliberately small and dependency-free:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -23,10 +24,10 @@ import os
 import re
 import secrets
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .contracts import Message
@@ -407,3 +408,35 @@ def exclusive_lock(path: Path, timeout_s: float = 10.0) -> Iterator[None]:
         except OSError:
             pass
         handle.close()
+
+
+def _loop_file_lock(loop: asyncio.AbstractEventLoop, key: str) -> asyncio.Lock:
+    """Per-event-loop in-process guard, so a stale lock never crosses loops."""
+    locks: dict[str, asyncio.Lock] | None = getattr(loop, "_usoc_file_locks", None)
+    if locks is None:
+        locks = {}
+        setattr(loop, "_usoc_file_locks", locks)
+    return locks.setdefault(key, asyncio.Lock())
+
+
+@asynccontextmanager
+async def async_exclusive_lock(
+    path: Path, timeout_s: float = 10.0
+) -> AsyncIterator[None]:
+    """Cross-process lock without blocking the asyncio event loop.
+
+    ``exclusive_lock`` spins on a blocking OS primitive for up to ``timeout_s``;
+    called directly from async code it stalls every coroutine in the process.
+    Acquisition and release therefore run in worker threads, while a
+    per-loop asyncio lock serialises local waiters before they contend on the
+    OS lock. The on-disk contract is unchanged.
+    """
+    loop = asyncio.get_running_loop()
+    key = str(path.resolve())
+    async with _loop_file_lock(loop, key):
+        ctx = exclusive_lock(path, timeout_s=timeout_s)
+        await loop.run_in_executor(None, ctx.__enter__)
+        try:
+            yield
+        finally:
+            await loop.run_in_executor(None, ctx.__exit__, None, None, None)

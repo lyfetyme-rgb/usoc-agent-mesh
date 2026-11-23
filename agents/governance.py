@@ -30,7 +30,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .contracts import ActionClass, Classification, RiskLevel
-from .security import SecurityError, Signer, canonical, exclusive_lock, secure_dir, secure_file
+from .security import SecurityError, Signer, async_exclusive_lock, canonical, secure_dir, secure_file
 
 GOVERNED = frozenset({ActionClass.EXECUTE, ActionClass.CONTAIN})
 TIER_RANK = {
@@ -599,7 +599,7 @@ class FileApprovalStore(InMemoryApprovalStore):
         self._stamp = (stat.st_mtime_ns, stat.st_size)
 
     async def request(self, req: ApprovalRequest) -> ApprovalRequest:
-        with exclusive_lock(self.path):
+        async with async_exclusive_lock(self.path):
             self._refresh()
             result = await super().request(req)
             self._save()
@@ -618,7 +618,7 @@ class FileApprovalStore(InMemoryApprovalStore):
         note: str | None = None,
         credential: ApprovalCredential | None = None,
     ) -> ApprovalRequest:
-        with exclusive_lock(self.path):
+        async with async_exclusive_lock(self.path):
             self._refresh()
             result = await super().decide(
                 approval_id,
@@ -633,7 +633,7 @@ class FileApprovalStore(InMemoryApprovalStore):
     async def consume(
         self, approval_id: str, *, nonce: str, correlation_id: str = ""
     ) -> ApprovalRequest | None:
-        with exclusive_lock(self.path):
+        async with async_exclusive_lock(self.path):
             self._refresh()
             result = await super().consume(
                 approval_id, nonce=nonce, correlation_id=correlation_id
