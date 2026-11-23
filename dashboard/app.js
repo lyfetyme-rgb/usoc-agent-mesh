@@ -20,6 +20,7 @@ const ERROR_LABELS = {
 let inFlight = false;
 let pollTimer = null;
 let failures = 0;
+let paused = false;
 let lastGood = null;
 let lastGoodAt = null;
 
@@ -29,9 +30,33 @@ function tick() {
   set("date", now.toLocaleDateString(undefined, {weekday:"short",year:"numeric",month:"short",day:"numeric"}).toUpperCase());
 }
 tick(); setInterval(tick, 1000);
+
 $("theme").addEventListener("click", () => {
-  document.body.classList.toggle("light");
-  $("theme").textContent = document.body.classList.contains("light") ? "◑ DARK" : "◐ LIGHT";
+  const light = document.body.classList.toggle("light");
+  $("theme-label").textContent = light ? "DARK" : "LIGHT";
+  $("theme").setAttribute("aria-pressed", String(light));
+});
+
+// An explicit pause control is required for tickers/previews: users must be
+// able to stop background work without hiding the tab.
+$("live-toggle").addEventListener("click", () => {
+  paused = !paused;
+  const button = $("live-toggle");
+  button.setAttribute("aria-pressed", String(paused));
+  $("live-label").textContent = paused ? "RESUME" : "PAUSE";
+  if (paused) {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = null;
+    setSync("PAUSED", "warn");
+  } else {
+    refresh();
+  }
+});
+
+$("refresh-now").addEventListener("click", () => {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = null;
+  refresh();
 });
 
 /** Fetch with a bounded timeout so a hung proxy cannot pin the poll loop. */
@@ -71,6 +96,8 @@ function firstError(errors) {
 
 function setSync(text, kind) {
   set("sync", text);
+  const label = $("sync");
+  if (label) label.className = kind;
   $("sync-dot").className = `dot ${kind}`;
 }
 
@@ -153,17 +180,19 @@ async function refresh() {
 
 function scheduleNext() {
   if (pollTimer) clearTimeout(pollTimer);
-  if (document.visibilityState === "hidden") {
+  pollTimer = null;
+  // Explicit user pause and hidden tabs both stop background work. Neither
+  // clears `failures`, so a returning tab never bursts through its backoff.
+  if (paused || document.visibilityState === "hidden") {
     setSync("PAUSED", "warn");
     return;
   }
-  // Visibility changes never clear `failures`: a returning tab must not burst
-  // through the backoff that was already earned by repeated failures.
   const delay = failures > 0 ? Math.min(POLL_MS * 2 ** Math.min(failures, 3), 60000) : POLL_MS;
   pollTimer = setTimeout(refresh, delay);
 }
 
 document.addEventListener("visibilitychange", () => {
+  if (paused) return;
   if (document.visibilityState === "visible") {
     if (pollTimer) clearTimeout(pollTimer);
     refresh();
@@ -172,9 +201,11 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+const publicPanel = $("public-panel");
 $("public-load").addEventListener("click", async () => {
   const button = $("public-load");
   button.disabled = true;
+  publicPanel.setAttribute("aria-busy", "true");
   set("public-message", "Loading historical records from data.wa.gov…");
   try {
     const data = await getJson("/api/public-data", 30000);
@@ -187,7 +218,10 @@ $("public-load").addEventListener("click", async () => {
     for (const id of ["public-count","public-matched","public-detail","public-causes"]) set(id, UNKNOWN);
     const reason = error?.status ? reasonLabel(`http_${error.status}`) : reasonLabel(error?.reason);
     set("public-message", `Public data unavailable (${reason}). Try again when the publisher is reachable.`);
-  } finally { button.disabled = false; }
+  } finally {
+    button.disabled = false;
+    publicPanel.setAttribute("aria-busy", "false");
+  }
 });
 
 refresh();

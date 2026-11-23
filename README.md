@@ -400,7 +400,12 @@ failures are labelled separately, and a transient outage keeps the last known
 good values marked STALE instead of presenting guesses as live data. Connector
 counts indicate configuration, not successful ingestion. Incident, evidence,
 and metrics panels are placeholders, not live feeds; Prometheus is the proposed
-next source and is not yet installed by this dashboard.
+next source and is not yet installed by this dashboard. The console follows the
+UI/UX Pro Max dark operations-console direction: visible keyboard focus, 44px
+tap targets, inline SVG icons, reduced-motion support, and no external font or
+asset requests under its content-security policy. Live polling can be paused
+and resumed or refreshed on demand; hidden tabs stop background work and keep
+their earned retry backoff.
 
 ### Jira Cloud (read-only)
 
