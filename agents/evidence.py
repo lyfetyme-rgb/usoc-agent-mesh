@@ -18,7 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .security import Signer, exclusive_lock, secure_dir, secure_file
+from .security import Signer, async_exclusive_lock, secure_dir, secure_file
 
 
 class EvidenceRecord(BaseModel):
@@ -193,25 +193,44 @@ class EvidenceChain:
         self._loaded = False
 
     def _tail(self) -> tuple[int, str]:
-        """Best-effort read of the last record, without full verification."""
+        """Read only the final record; O(last line), not O(chain length).
+
+        Appends call this under the cross-process lock. A forward scan made
+        every append re-parse the whole chain, so a long chain grew quadratically.
+        Scanning backwards from EOF keeps append cost flat while still catching
+        up with another process's most recent record.
+        """
         if not self.path.is_file():
             return 0, "genesis"
-        last: EvidenceRecord | None = None
+        block = 4096
         try:
-            with self.path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        last = EvidenceRecord.model_validate_json(line)
-                    except ValueError:
-                        # Fail closed; the full verification on read will say why.
-                        return -1, "corrupt"
+            with self.path.open("rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                pos = fh.tell()
+                if pos == 0:
+                    return 0, "genesis"
+                raw = b""
+                line: bytes | None = None
+                while pos > 0:
+                    start = max(0, pos - block)
+                    fh.seek(start)
+                    raw = fh.read(pos - start) + raw
+                    pos = start
+                    # If the window starts mid-record, its first split fragment
+                    # is incomplete; only trust lines after a real newline.
+                    lines = raw.split(b"\n") if start == 0 else raw.split(b"\n")[1:]
+                    candidates = [part.strip() for part in lines if part.strip()]
+                    if candidates:
+                        line = candidates[-1]
+                        break
         except OSError:
             return -1, "corrupt"
-        if last is None:
+        if line is None:
             return 0, "genesis"
+        try:
+            last = EvidenceRecord.model_validate_json(line.decode("utf-8"))
+        except (ValueError, UnicodeError):
+            return -1, "corrupt"
         return last.seq, last.hash
 
     def _load(self) -> None:
@@ -248,7 +267,7 @@ class EvidenceChain:
     ) -> EvidenceRecord:
         async with self._lock:
             self._load()
-            with exclusive_lock(self.path, timeout_s=10.0):
+            async with async_exclusive_lock(self.path, timeout_s=10.0):
                 # Another process may have appended since we loaded; catch up
                 # under the shared file lock before forking the chain.
                 seq, last_hash = self._tail()
@@ -280,8 +299,6 @@ class EvidenceChain:
                 with self.path.open("a", encoding="utf-8") as fh:
                     fh.write(record.model_dump_json() + "\n")
                     fh.flush()
-                    import os
-
                     os.fsync(fh.fileno())
             secure_file(self.path)
             self._seq = record.seq

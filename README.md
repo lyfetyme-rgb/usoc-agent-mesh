@@ -345,7 +345,10 @@ and every decision must carry a cryptographic credential — see
 `agents/evidence.py` writes an append-only JSONL chain. Each record hashes the
 previous record, so modifying or deleting an entry breaks verification. OEKP
 appends; BENGAL independently recomputes and reports the failure. Governed
-execution results are recorded automatically by the runtime gate.
+execution results are recorded automatically by the runtime gate. Appends find
+the chain tail by scanning backwards from EOF, so append cost stays flat as the
+chain grows, and cross-process locks are acquired off the event loop so file
+contention cannot stall unrelated async work.
 
 ### Wave failure and compensation
 
