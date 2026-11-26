@@ -56,9 +56,23 @@ def test_ci_has_all_three_required_checks():
         "pip_audit",
         "bandit",
         "github.com/zricethezav/gitleaks/v8@v8.30.1",
+        "toolbox/security/gitleaks.toml",
         "aquasecurity/trivy-action@v0.36.0",
     ):
         assert marker in security_steps
+
+
+def test_gitleaks_config_excludes_foreign_and_generated_trees():
+    config = read("toolbox/security/gitleaks.toml")
+    assert "useDefault = true" in config
+    for path in (
+        "^h-lift/",
+        "^gateway-cloud-functions/",
+        "^atlas/",
+        "^workspace(?:-frag)?/",
+        "^secrets/",
+    ):
+        assert path in config
 
 
 def test_release_workflow_signs_attests_and_publishes_sboms():
