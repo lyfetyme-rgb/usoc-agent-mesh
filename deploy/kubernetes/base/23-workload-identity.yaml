@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: usoc-workload-identity
+  namespace: usoc-prod
+data:
+  identity.json: |
+    {
+      "audience": "usoc-mesh",
+      "coordinatorKeyring": "agents/CoordinatorKeyring",
+      "automountServiceAccountToken": false,
+      "detachedApprovalCredential": "required",
+      "oidcBinding": "approval-nonce",
+      "note": "Kubernetes ServiceAccounts carry no mounted token for runtime agents; application-level Ed25519 identity is per coordinator and cannot be assumed by another worker."
+    }

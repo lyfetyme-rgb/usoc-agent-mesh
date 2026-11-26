@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: usoc-range
+  labels:
+    app.kubernetes.io/part-of: usoc-range
+    security.usoc/isolation: out-of-band

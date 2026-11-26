@@ -1,0 +1,5 @@
+{"scenario_id":"edge-connectivity-001","tenant_id":"tenant-a"}
+{"seq":1,"kind":"connect","source":"edge-01","target":"core-01","observed_at":"2026-01-01T00:00:00Z"}
+{"seq":2,"kind":"connect","source":"core-01","target":"db-01","observed_at":"2026-01-01T00:01:00Z"}
+{"seq":3,"kind":"expected_path","source":"edge-01","target":"db-01","observed_at":"2026-01-01T00:02:00Z"}
+{"seq":4,"kind":"expected_path","source":"core-01","target":"db-01","observed_at":"2026-01-01T00:03:00Z"}

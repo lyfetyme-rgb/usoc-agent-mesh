@@ -1,0 +1,14 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: seraphim-quarantine-isolate
+  namespace: usoc-prod
+spec:
+  podSelector:
+    matchLabels:
+      security.usoc/quarantine: isolate
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
