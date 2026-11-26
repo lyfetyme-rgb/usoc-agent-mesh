@@ -1,0 +1,27 @@
+# Gitleaks configuration for the USOC-owned tree.
+#
+# The default rule set stays active. The allowlist below prevents the secret
+# scanner from inspecting separate projects and local runtime artifacts that
+# this repository neither owns nor commits; those trees have their own
+# controls. Generated Python/Next.js state is likewise ignored because it is
+# untracked and can contain development-only preview keys.
+
+title = "USOC secret scan"
+
+[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+  '''^h-lift/''',
+  '''^gateway-cloud-functions/''',
+  '''^atlas/''',
+  '''^workspace(?:-frag)?/''',
+  '''^secrets/''',
+  '''^data/''',
+  '''^node_modules/''',
+  '''^\.git/''',
+  '''(?:^|/)\.next/''',
+  '''(?:^|/)__pycache__/''',
+  '''(?:^|/)\.pytest_cache/''',
+]

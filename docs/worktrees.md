@@ -15,8 +15,10 @@ without overwriting each other's files or sharing mutable runtime state.
 
 ## Branches and paths
 
-All work branches are created from `dev` (the integration branch) and merge back to
-`dev` via PR, where CI (`pytest`) is required:
+All work branches are created from `dev` (the protected integration branch) and merge
+back to `dev` via PR, where `pytest`, `security` and `traceability` are required. See
+[`docs/release-engineering.md`](release-engineering.md) for the full branch, release and
+deployment policy:
 
 | Worktree | Branch | Purpose |
 |---|---|---|

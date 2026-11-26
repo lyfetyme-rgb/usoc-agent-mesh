@@ -12,7 +12,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-K8S = ROOT / "deploy" / "kubernetes"
+K8S = ROOT / "deploy" / "kubernetes" / "base"
 MANIFESTS = sorted(K8S.glob("*.yaml"))
 EXAMPLES = sorted(K8S.glob("*.example"))
 
@@ -20,6 +20,8 @@ EXAMPLES = sorted(K8S.glob("*.example"))
 def load_manifests() -> list[dict]:
     docs: list[dict] = []
     for path in MANIFESTS:
+        if path.name == "kustomization.yaml":
+            continue
         for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
             if doc:
                 doc["_source"] = path.name
@@ -55,7 +57,7 @@ def test_manifest_set_is_parseable_and_scoped_to_one_namespace():
         "20-network-policies.yaml",
         "30-dashboard-proxy.yaml",
     }
-    # Templates carry a .example suffix so `kubectl apply -f .` never creates
+    # Templates carry a .example suffix so `kubectl apply -k` never creates
     # a usable-looking Secret or an unauthenticated public Ingress.
     assert {p.name for p in EXAMPLES} == {
         "01-secrets.example.yaml.example",

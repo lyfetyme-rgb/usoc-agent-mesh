@@ -1,0 +1,15 @@
+# Bandit configuration for USOC Mesh.
+#
+# B608 is skipped because every interpolated SQL identifier in agents/postgres.py
+# is validated against _SAFE_IDENTIFIER before it reaches a query. Values are
+# always passed as bound parameters. The suppression is scoped to this project
+# configuration rather than sprinkled through the SQL layer.
+skips:
+  - B608
+
+exclude_dirs:
+  - tests
+  - workspace
+  - atlas
+  - gateway-cloud-functions
+  - h-lift

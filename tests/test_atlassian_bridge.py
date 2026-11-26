@@ -21,6 +21,8 @@ from agents.contracts import ActionClass, RiskLevel
 from agents.governance import ApprovalRequest, FileApprovalStore
 from agents.security import SecurityError, Signer
 
+SIGNING_MATERIAL = "test-secret-that-is-long-enough-32"
+
 
 class FakeTransport:
     def __init__(self, existing: list[dict] | None = None) -> None:
@@ -82,14 +84,14 @@ def decided_approval(tmp_path: Path, signer: Signer, *, approved: bool = True):
 
 
 def test_bridge_is_opt_in(tmp_path: Path):
-    signer = Signer("test-secret-that-is-long-enough-32")
+    signer = Signer(SIGNING_MATERIAL)
     assert build_bridge(Settings(), signer) is None
     with pytest.raises(SecurityError, match="disabled"):
         AtlassianBridge(Settings(), signer)
 
 
 def test_bridge_fails_closed_without_credentials_or_space(tmp_path: Path):
-    signer = Signer("test-secret-that-is-long-enough-32")
+    signer = Signer(SIGNING_MATERIAL)
     with pytest.raises(SecurityError, match="API_KEY"):
         AtlassianBridge(
             Settings(
@@ -111,7 +113,7 @@ def test_bridge_fails_closed_without_credentials_or_space(tmp_path: Path):
 
 
 def test_publish_creates_signed_adr_and_jsm_then_is_idempotent(tmp_path: Path):
-    signer = Signer("test-secret-that-is-long-enough-32")
+    signer = Signer(SIGNING_MATERIAL)
     approval = decided_approval(tmp_path, signer)
     transport = FakeTransport()
     bridge = AtlassianBridge(
@@ -141,7 +143,7 @@ def test_publish_creates_signed_adr_and_jsm_then_is_idempotent(tmp_path: Path):
 
 
 def test_envelope_signature_covers_adr_and_evidence_head(tmp_path: Path):
-    signer = Signer("test-secret-that-is-long-enough-32")
+    signer = Signer(SIGNING_MATERIAL)
     approval = decided_approval(tmp_path, signer)
     envelope = build_publication_envelope(
         approval, {"seq": 7, "hash": "abc123"}, signer
@@ -156,7 +158,7 @@ def test_envelope_signature_covers_adr_and_evidence_head(tmp_path: Path):
 
 
 def test_pending_approval_cannot_be_published(tmp_path: Path):
-    signer = Signer("test-secret-that-is-long-enough-32")
+    signer = Signer(SIGNING_MATERIAL)
     pending = ApprovalRequest(
         action_class=ActionClass.EXECUTE,
         target="sandbox/example",
@@ -168,7 +170,7 @@ def test_pending_approval_cannot_be_published(tmp_path: Path):
 
 
 def test_jsm_disabled_skips_ticket_creation(tmp_path: Path):
-    signer = Signer("test-secret-that-is-long-enough-32")
+    signer = Signer(SIGNING_MATERIAL)
     approval = decided_approval(tmp_path, signer)
     transport = FakeTransport()
     bridge = AtlassianBridge(
@@ -188,8 +190,8 @@ def test_publish_decision_cli_fails_cleanly_when_bridge_is_disabled(
     from agents.config import get_settings
 
     get_settings.cache_clear()  # get_settings() is process-cached; honour the env
-    monkeypatch.setenv("AGENT_SHARED_SECRET", "test-secret-that-is-long-enough-32")
-    signer = Signer("test-secret-that-is-long-enough-32")
+    monkeypatch.setenv("AGENT_SHARED_SECRET", SIGNING_MATERIAL)
+    signer = Signer(SIGNING_MATERIAL)
     req = decided_approval(tmp_path / "ws", signer)
     args = argparse.Namespace(
         approval_id=req.id,
@@ -202,7 +204,7 @@ def test_publish_decision_cli_fails_cleanly_when_bridge_is_disabled(
 
 
 def test_existing_page_is_updated_with_a_new_version(tmp_path: Path):
-    signer = Signer("test-secret-that-is-long-enough-32")
+    signer = Signer(SIGNING_MATERIAL)
     approval = decided_approval(tmp_path, signer, approved=False)
     transport = FakeTransport(
         existing=[{"id": "556677", "version": {"number": 4}}]

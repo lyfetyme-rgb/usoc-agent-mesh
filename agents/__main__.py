@@ -1360,14 +1360,18 @@ async def _run_fragmentation_demo(args: argparse.Namespace) -> int:
 def cmd_probe(args: argparse.Namespace) -> int:
     import urllib.error
     import urllib.request
+    from urllib.parse import urlparse
 
     settings = _settings(args)
     url = args.url or f"http://{settings.health_host}:{settings.health_port}/health"
+    if urlparse(url).scheme not in ("http", "https"):
+        raise ValueError("probe URL must use http or https")
     token = args.token or read_secret(settings.health_token, settings.health_token_file)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=3) as response:
+        # B310 is suppressed here: the URL scheme was restricted to http/https above.
+        with urllib.request.urlopen(request, timeout=3) as response:  # nosec B310
             body = response.read(4096).decode("utf-8", "replace")
             print(f"{response.status} {body}")
             return 0 if 200 <= response.status < 300 else 1

@@ -1,0 +1,344 @@
+version: 1
+tracker: github-issues
+repository: lyfetyme-rgb/usoc-agent-mesh
+chain:
+  - mission_requirement
+  - capability
+  - operational_function
+  - system_requirement
+  - issue
+  - code
+  - tests
+  - artifacts
+  - deployment_approval
+  - operational_validation
+statuses: [planned, in_progress, implemented, blocked]
+
+requirements:
+  - id: REQ-001
+    title: Professional repository structure and lifecycle controls
+    mission_requirement: MR-001
+    capability: CAP-REPO
+    operational_function: OF-LIFECYCLE
+    system_requirement: SR-REPO-001
+    issue: 27
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/27
+    phase: 0
+    status: in_progress
+    parent: null
+    code:
+      - .github/workflows/ci.yml
+      - .github/workflows/release.yml
+      - .github/workflows/deploy.yml
+      - deploy/kubernetes/kustomization.yaml
+    tests:
+      - tests/test_release_engineering.py
+      - tests/test_traceability.py
+    artifacts:
+      - .github/workflows/release.yml
+      - .github/workflows/deploy.yml
+      - deploy/kubernetes/overlays/production/kustomization.yaml
+    deployment_approval: GitHub Environment production with required reviewer and pytest gate
+    operational_validation: deploy/kubernetes/base/12-doctor-job.yaml plus tests/loadtest/
+
+  - id: REQ-002
+    title: Requirements traceability to operational validation
+    mission_requirement: MR-002
+    capability: CAP-TRACE
+    operational_function: OF-ASSURANCE
+    system_requirement: SR-TRACE-001
+    issue: 28
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/28
+    phase: 0
+    status: in_progress
+    parent: null
+    code:
+      - docs/requirements/catalog.yaml
+      - toolbox/scripts/traceability_check.py
+      - .github/pull_request_template.md
+    tests:
+      - tests/test_traceability.py
+    artifacts:
+      - docs/requirements/catalog.yaml
+      - toolbox/scripts/traceability_check.py
+    deployment_approval: GitHub Environment production approval recorded in release notes
+    operational_validation: CI traceability job plus release evidence bundle
+
+  - id: REQ-003
+    title: AICEE production control plane services
+    mission_requirement: MR-003
+    capability: CAP-AICEE
+    operational_function: OF-CONTROL
+    system_requirement: SR-AICEE-001
+    issue: 29
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/29
+    phase: 1
+    status: planned
+    parent: null
+    code:
+      - agents/governance.py
+      - agents/ingress.py
+      - agents/mesh.py
+    tests:
+      - tests/test_governance.py
+      - tests/test_ingress.py
+    artifacts: []
+    deployment_approval: Pending Phase 1 gated rollout
+    operational_validation: Pending Phase 1 benchmark and doctor evidence
+
+  - id: REQ-004
+    title: Production Waste Optimization Agent
+    mission_requirement: MR-004
+    capability: CAP-WASTE
+    operational_function: OF-OPTIMIZE
+    system_requirement: SR-WASTE-001
+    issue: 30
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/30
+    phase: 2
+    status: planned
+    parent: null
+    code:
+      - agents/connectors.py
+      - agents/correlation.py
+      - agents/usoc_agents.py
+    tests:
+      - tests/test_connectors.py
+      - tests/test_bengal.py
+    artifacts: []
+    deployment_approval: Pending Phase 2 HITL approval design
+    operational_validation: Pending Phase 2 before/after savings validation
+
+  - id: REQ-005
+    title: Seraphim security implementation
+    mission_requirement: MR-005
+    capability: CAP-SERAPHIM
+    operational_function: OF-SECURE
+    system_requirement: SR-SERAPHIM-001
+    issue: 31
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/31
+    phase: 3
+    status: planned
+    parent: null
+    code:
+      - agents/evidence.py
+      - deploy/kubernetes/base/20-network-policies.yaml
+    tests:
+      - tests/test_security.py
+      - tests/test_kubernetes_manifests.py
+    artifacts: []
+    deployment_approval: Pending Phase 3 security review
+    operational_validation: Pending Phase 3 admission/quarantine tests
+
+  - id: REQ-006
+    title: ACIE laboratory implementation
+    mission_requirement: MR-006
+    capability: CAP-ACIE
+    operational_function: OF-SIMULATE
+    system_requirement: SR-ACIE-001
+    issue: 32
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/32
+    phase: 3
+    status: planned
+    parent: null
+    code:
+      - agents/fragmentation.py
+      - fixtures/fragmentation/network.jsonl
+    tests:
+      - tests/test_fragmentation.py
+    artifacts: []
+    deployment_approval: Pending Phase 3 lab approval
+    operational_validation: Pending Phase 3 simulation evidence
+
+  - id: REQ-007
+    title: Isolated Cyber Defense Range
+    mission_requirement: MR-007
+    capability: CAP-RANGE
+    operational_function: OF-TEST
+    system_requirement: SR-RANGE-001
+    issue: 33
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/33
+    phase: 3
+    status: planned
+    parent: null
+    code:
+      - subsystems.yaml
+      - docs/architecture.md
+    tests:
+      - tests/test_redteam.py
+    artifacts: []
+    deployment_approval: Pending separate isolated range environment
+    operational_validation: Pending range scenario evidence
+
+  - id: REQ-008
+    title: UI/product views and executive outcomes
+    mission_requirement: MR-008
+    capability: CAP-UI
+    operational_function: OF-REPORT
+    system_requirement: SR-UI-001
+    issue: 34
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/34
+    phase: 4
+    status: planned
+    parent: null
+    code:
+      - dashboard/app.js
+      - dashboard/server.py
+    tests:
+      - tests/test_dashboard_server.py
+    artifacts: []
+    deployment_approval: Pending Phase 4 product review
+    operational_validation: Pending executive KPI validation
+
+  - id: REQ-009
+    title: Performance engineering benchmark suite
+    mission_requirement: MR-009
+    capability: CAP-PERF
+    operational_function: OF-BENCHMARK
+    system_requirement: SR-PERF-001
+    issue: 35
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/35
+    phase: 4
+    status: planned
+    parent: null
+    code:
+      - tests/loadtest/k6-health-probe.js
+      - tests/loadtest/nonce_contention.py
+    tests:
+      - tests/test_loadtest_artifacts.py
+    artifacts: []
+    deployment_approval: Pending Phase 4 performance review
+    operational_validation: Pending checked-in benchmark results
+
+  - id: REQ-010
+    title: Security and production readiness assurance
+    mission_requirement: MR-010
+    capability: CAP-READINESS
+    operational_function: OF-ASSURE
+    system_requirement: SR-READINESS-001
+    issue: 36
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/36
+    phase: 3
+    status: planned
+    parent: null
+    code:
+      - SECURITY.md
+      - .github/workflows/ci.yml
+    tests:
+      - tests/test_production_trust.py
+      - tests/test_kubernetes_manifests.py
+    artifacts: []
+    deployment_approval: Pending security assurance evidence
+    operational_validation: Pending IR and recovery drill records
+
+  - id: ENG-001
+    title: Add requirement catalog and automated traceability check
+    mission_requirement: MR-002
+    capability: CAP-TRACE
+    operational_function: OF-ASSURANCE
+    system_requirement: SR-TRACE-002
+    issue: 37
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/37
+    phase: 0
+    status: implemented
+    parent: REQ-002
+    code:
+      - docs/requirements/catalog.yaml
+      - toolbox/scripts/traceability_check.py
+      - .github/pull_request_template.md
+    tests:
+      - tests/test_traceability.py
+    artifacts:
+      - docs/requirements/catalog.yaml
+      - toolbox/scripts/traceability_check.py
+    deployment_approval: CI required check on all protected branches
+    operational_validation: CI traceability job output
+
+  - id: ENG-002
+    title: Add SBOM, artifact signing and container build workflow
+    mission_requirement: MR-001
+    capability: CAP-REPO
+    operational_function: OF-LIFECYCLE
+    system_requirement: SR-REPO-002
+    issue: 38
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/38
+    phase: 0
+    status: implemented
+    parent: REQ-001
+    code:
+      - .github/workflows/release.yml
+    tests:
+      - tests/test_release_engineering.py
+    artifacts:
+      - .github/workflows/release.yml
+    deployment_approval: GHCR digest plus cosign signature verified by deploy workflow
+    operational_validation: Release workflow attestation and image digest
+
+  - id: ENG-003
+    title: Add SAST, dependency, secret and container scanning
+    mission_requirement: MR-010
+    capability: CAP-READINESS
+    operational_function: OF-ASSURE
+    system_requirement: SR-READINESS-002
+    issue: 39
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/39
+    phase: 0
+    status: implemented
+    parent: REQ-010
+    code:
+      - .github/workflows/ci.yml
+      - toolbox/security/bandit.yaml
+    tests:
+      - tests/test_release_engineering.py
+    artifacts:
+      - .github/workflows/ci.yml
+      - toolbox/security/bandit.yaml
+    deployment_approval: CI security job required on protected branches
+    operational_validation: SARIF/artifact upload from CI security job
+
+  - id: ENG-004
+    title: Add staging overlay and gated deployment workflow
+    mission_requirement: MR-001
+    capability: CAP-REPO
+    operational_function: OF-LIFECYCLE
+    system_requirement: SR-REPO-003
+    issue: 40
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/40
+    phase: 0
+    status: implemented
+    parent: REQ-001
+    code:
+      - .github/workflows/deploy.yml
+      - toolbox/scripts/render_overlay.py
+      - deploy/kubernetes/base/kustomization.yaml
+      - deploy/kubernetes/overlays/staging/kustomization.yaml
+      - deploy/kubernetes/overlays/production/kustomization.yaml
+    tests:
+      - tests/test_release_engineering.py
+    artifacts:
+      - .github/workflows/deploy.yml
+      - deploy/kubernetes/overlays/staging/kustomization.yaml
+      - deploy/kubernetes/overlays/production/kustomization.yaml
+    deployment_approval: GitHub Environment approval for staging then production
+    operational_validation: Doctor Job and smoke probe in deploy workflow
+
+  - id: ENG-005
+    title: Protect dev and enforce CI gates on all branches
+    mission_requirement: MR-001
+    capability: CAP-REPO
+    operational_function: OF-LIFECYCLE
+    system_requirement: SR-REPO-004
+    issue: 41
+    issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/41
+    phase: 0
+    status: implemented
+    parent: REQ-001
+    code:
+      - .github/CODEOWNERS
+      - docs/release-engineering.md
+    tests:
+      - tests/test_release_engineering.py
+    artifacts:
+      - .github/CODEOWNERS
+      - docs/release-engineering.md
+    deployment_approval: GitHub branch protection with required CI checks; one-review target documented until a second maintainer exists
+    operational_validation: docs/release-engineering.md verification commands

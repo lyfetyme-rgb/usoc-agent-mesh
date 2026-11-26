@@ -56,3 +56,51 @@ jobs:
           python -m agents storyboard --vertical healthcare > /dev/null
       - name: Offline LLM rehearsal (zero egress)
         run: python -m agents --workspace workspace/rehearsal-ci llm-rehearsal > /dev/null
+
+  traceability:
+    name: traceability
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install pyyaml
+      - name: Validate requirement catalog
+        run: python toolbox/scripts/traceability_check.py
+
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install scanners
+        run: python -m pip install --upgrade pip && python -m pip install pip-audit bandit
+      - name: Dependency vulnerability audit
+        run: python -m pip_audit . --progress-spinner off
+      - name: SAST (Bandit)
+        run: python -m bandit -r agents -ll -q -c toolbox/security/bandit.yaml
+      - name: Secret scan (Gitleaks)
+        run: |
+          set -euo pipefail
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          "$(go env GOPATH)/bin/gitleaks" detect --source . --no-git --redact \
+            --config toolbox/security/gitleaks.toml --exit-code 1
+      - name: Filesystem vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"

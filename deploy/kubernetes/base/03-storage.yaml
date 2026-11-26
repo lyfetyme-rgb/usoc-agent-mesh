@@ -3,8 +3,8 @@
 # Approvals, OEKP evidence and the task ledger live in tenant-partitioned
 # Postgres; Redis is a short-lived hot cache; the signed redacted ledger chain
 # is archived to S3 Object Lock (WORM). Control-plane and worker pods therefore
-# need only a per-pod /tmp emptyDir. This ConfigMap exists so `kubectl apply -f
-# deploy/kubernetes/` remains a deterministic, ordered operation and so the
+# need only a per-pod /tmp emptyDir. This ConfigMap exists so `kubectl apply -k
+# deploy/kubernetes` remains a deterministic, ordered operation and so the
 # policy is visible to operators auditing the manifests.
 apiVersion: v1
 kind: ConfigMap

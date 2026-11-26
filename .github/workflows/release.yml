@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Optional explicit image tag (defaults to v-tag, ref, or sha)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: lyfetyme-rgb
+
+jobs:
+  release:
+    name: build, sbom, sign, attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Install Syft
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            tag="${{ inputs.image_tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+            tag="main-${GITHUB_SHA::7}"
+          else
+            tag="${GITHUB_REF_NAME}-${GITHUB_SHA::7}"
+          fi
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push usoc-mesh
+        id: mesh
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/usoc-mesh:${{ steps.tag.outputs.value }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.value }}
+
+      - name: Build and push usoc-dashboard
+        id: dashboard
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.dashboard
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/usoc-dashboard:${{ steps.tag.outputs.value }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.value }}
+
+      - name: Generate source SBOMs
+        run: |
+          set -euo pipefail
+          syft dir:. -o spdx-json=usoc-mesh-source.spdx.json
+          syft dir:. -o cyclonedx-json=usoc-mesh-source.cdx.json
+
+      - name: Generate and attest image SBOMs
+        env:
+          MESH_DIGEST: ${{ steps.mesh.outputs.digest }}
+          DASH_DIGEST: ${{ steps.dashboard.outputs.digest }}
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          set -euo pipefail
+          mesh_ref="${REGISTRY}/${IMAGE_OWNER}/usoc-mesh@${MESH_DIGEST}"
+          dash_ref="${REGISTRY}/${IMAGE_OWNER}/usoc-dashboard@${DASH_DIGEST}"
+          syft "${mesh_ref}" -o spdx-json=usoc-mesh-image.spdx.json
+          syft "${dash_ref}" -o spdx-json=usoc-dashboard-image.spdx.json
+          cosign attest --yes --type spdxjson --predicate usoc-mesh-image.spdx.json "${mesh_ref}"
+          cosign attest --yes --type spdxjson --predicate usoc-dashboard-image.spdx.json "${dash_ref}"
+
+      - name: Sign images with keyless OIDC
+        env:
+          MESH_DIGEST: ${{ steps.mesh.outputs.digest }}
+          DASH_DIGEST: ${{ steps.dashboard.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${REGISTRY}/${IMAGE_OWNER}/usoc-mesh@${MESH_DIGEST}"
+          cosign sign --yes "${REGISTRY}/${IMAGE_OWNER}/usoc-dashboard@${DASH_DIGEST}"
+
+      - name: Attach SLSA provenance
+        env:
+          MESH_DIGEST: ${{ steps.mesh.outputs.digest }}
+          DASH_DIGEST: ${{ steps.dashboard.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for spec in "usoc-mesh:${MESH_DIGEST}" "usoc-dashboard:${DASH_DIGEST}"; do
+            name="${spec%%:*}"
+            digest="${spec#*:}"
+            hash="${digest#sha256:}"
+            cat > "${name}-provenance.json" <<EOF
+          {
+            "_type": "https://in-toto.io/Statement/v0.1",
+            "subject": [{"name": "${name}", "digest": {"sha256": "${hash}"}}],
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "predicate": {
+              "buildDefinition": {"buildType": "https://github.com/actions/workflow"},
+              "runDetails": {
+                "builder": {"id": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"}
+              }
+            }
+          }
+          EOF
+            cosign attest --yes --type slsaprovenance \
+              --predicate "${name}-provenance.json" \
+              "${REGISTRY}/${IMAGE_OWNER}/${name}@${digest}"
+          done
+
+      - name: Upload release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: usoc-release-evidence-${{ steps.tag.outputs.value }}
+          path: |
+            *.spdx.json
+            *.cdx.json
+            *-provenance.json
+          if-no-files-found: error
