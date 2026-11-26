@@ -1,0 +1,151 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [staging, production]
+      mesh_digest:
+        description: "Signed usoc-mesh image digest (sha256:...)"
+        required: true
+        type: string
+      dashboard_digest:
+        description: "Signed usoc-dashboard image digest (sha256:...)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+  id-token: write
+
+concurrency:
+  group: usoc-deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: lyfetyme-rgb
+
+jobs:
+  deploy:
+    name: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-kubectl@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify cosign signatures and provenance
+        env:
+          MESH_DIGEST: ${{ inputs.mesh_digest }}
+          DASH_DIGEST: ${{ inputs.dashboard_digest }}
+        run: |
+          set -euo pipefail
+          issuer="https://token.actions.githubusercontent.com"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.*"
+          for spec in "usoc-mesh:${MESH_DIGEST}" "usoc-dashboard:${DASH_DIGEST}"; do
+            image="${REGISTRY}/${IMAGE_OWNER}/${spec%%:*}"
+            digest="${spec#*:}"
+            ref="${image}@${digest}"
+            cosign verify \
+              --certificate-oidc-issuer "$issuer" \
+              --certificate-identity-regexp "$identity" \
+              "$ref"
+            cosign verify-attestation \
+              --type slsaprovenance \
+              --certificate-oidc-issuer "$issuer" \
+              --certificate-identity-regexp "$identity" \
+              "$ref"
+          done
+
+      - name: Configure kubeconfig and namespace
+        env:
+          KUBE_CONFIG_STAGING: ${{ secrets.KUBE_CONFIG_STAGING }}
+          KUBE_CONFIG_PRODUCTION: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.environment }}" = "staging" ]; then
+            printf '%s' "$KUBE_CONFIG_STAGING" > kubeconfig
+            echo "NAMESPACE=usoc-staging" >> "$GITHUB_ENV"
+          elif [ "${{ inputs.environment }}" = "production" ]; then
+            printf '%s' "$KUBE_CONFIG_PRODUCTION" > kubeconfig
+            echo "NAMESPACE=usoc-prod" >> "$GITHUB_ENV"
+          else
+            echo "::error::unknown environment ${{ inputs.environment }}"
+            exit 1
+          fi
+          chmod 0600 kubeconfig
+
+      - name: Render overlay with verified digests
+        env:
+          MESH_DIGEST: ${{ inputs.mesh_digest }}
+          DASH_DIGEST: ${{ inputs.dashboard_digest }}
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet pyyaml
+          python toolbox/scripts/render_overlay.py \
+            "deploy/kubernetes/overlays/${{ inputs.environment }}" \
+            --mesh-image "${REGISTRY}/${IMAGE_OWNER}/usoc-mesh@${MESH_DIGEST}" \
+            --dashboard-image "${REGISTRY}/${IMAGE_OWNER}/usoc-dashboard@${DASH_DIGEST}" \
+            --output rendered.yaml
+
+      - name: Apply pinned manifest
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$PWD/kubeconfig"
+          # A completed Job cannot have its template image changed in place.
+          kubectl -n "$NAMESPACE" delete job usoc-doctor-preflight --ignore-not-found=true
+          kubectl apply -f rendered.yaml
+
+      - name: Wait for rollout
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$PWD/kubeconfig"
+          for deployment in usoc-mesh usoc-oekp-worker usoc-bengal-worker usoc-dashboard-proxy; do
+            kubectl -n "$NAMESPACE" rollout status "deployment/${deployment}" --timeout=240s
+          done
+
+      - name: Run doctor preflight Job
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$PWD/kubeconfig"
+          kubectl -n "$NAMESPACE" wait --for=condition=complete job/usoc-doctor-preflight --timeout=180s
+          kubectl -n "$NAMESPACE" logs job/usoc-doctor-preflight | tee doctor.log
+
+      - name: Readiness smoke probe
+        env:
+          AGENT_HEALTH_TOKEN: ${{ secrets.AGENT_HEALTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$PWD/kubeconfig"
+          kubectl -n "$NAMESPACE" exec deploy/usoc-mesh -- \
+            python -m agents probe --url http://127.0.0.1:8080/ready | tee smoke.log
+
+      - name: Upload deployment validation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: usoc-deploy-evidence-${{ inputs.environment }}-${{ github.run_id }}
+          path: |
+            rendered.yaml
+            doctor.log
+            smoke.log
+          if-no-files-found: error

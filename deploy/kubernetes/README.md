@@ -83,17 +83,9 @@ kubectl -n usoc-prod create secret generic usoc-mesh-secrets `
 #    and authenticating ingress namespace), 02-configmap.yaml (bucket, region,
 #    approvers), image references.
 
-# 3. Apply in order. `kubectl apply -f deploy/kubernetes/` applies every *.yaml
-#    in the directory, including the one-off doctor Job; the .example templates
-#    are deliberately excluded. Apply 12-doctor-job.yaml separately if you only
-#    want the preflight before a rollout.
-kubectl apply -f deploy/kubernetes/00-namespace.yaml
-kubectl apply -f deploy/kubernetes/02-configmap.yaml
-kubectl apply -f deploy/kubernetes/03-storage.yaml
-kubectl apply -f deploy/kubernetes/10-control-plane.yaml
-kubectl apply -f deploy/kubernetes/11-workers.yaml
-kubectl apply -f deploy/kubernetes/20-network-policies.yaml
-kubectl apply -f deploy/kubernetes/30-dashboard-proxy.yaml
+# 3. Apply the base with Kustomize. The one-off doctor Job is included; the
+#    .example templates are deliberately excluded from base/kustomization.yaml.
+kubectl apply -k deploy/kubernetes
 ```
 
 Do **not** apply `31-ingress.yaml.example` until an authenticating ingress is
@@ -194,7 +186,7 @@ single-writer constraint no longer exists.
 ### 3. Pre-flight and progressive traffic ramp
 
 ```powershell
-kubectl -n usoc-prod apply -f deploy/kubernetes/12-doctor-job.yaml
+kubectl apply -k deploy/kubernetes/overlays/production
 kubectl -n usoc-prod logs -f job/usoc-doctor-preflight
 kubectl -n usoc-prod delete job/usoc-doctor-preflight
 ```

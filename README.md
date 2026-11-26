@@ -69,7 +69,7 @@ python -m agents ingest --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --fixtures fixtures/fragmentation
 python -m agents demo-fragmentation --vertical finance      # transaction gate + dual HITL
 python -m agents demo-fragmentation --vertical healthcare   # PII/PHI taint + signed egress
-python -m pytest -q              # 359 passed, 1 env-gated skip, no network
+python -m pytest -q              # 489 passed, 1 env-gated skip, no network
 ```
 
 The demo runs fully offline with a deterministic echo model, so the whole message
