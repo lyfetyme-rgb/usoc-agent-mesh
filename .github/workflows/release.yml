@@ -132,11 +132,33 @@ jobs:
           {
             "_type": "https://in-toto.io/Statement/v0.1",
             "subject": [{"name": "${name}", "digest": {"sha256": "${hash}"}}],
-            "predicateType": "https://slsa.dev/provenance/v1",
+            "predicateType": "https://slsa.dev/provenance/v0.2",
             "predicate": {
-              "buildDefinition": {"buildType": "https://github.com/actions/workflow"},
-              "runDetails": {
-                "builder": {"id": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"}
+              "builder": {"id": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"},
+              "buildType": "https://github.com/actions/workflow",
+              "invocation": {
+                "configSource": {
+                  "uri": "https://github.com/${GITHUB_REPOSITORY}",
+                  "digest": {"sha1": "${GITHUB_SHA}"},
+                  "entryPoint": ".github/workflows/release.yml"
+                },
+                "parameters": {},
+                "environment": {
+                  "github_workflow": "${GITHUB_WORKFLOW}",
+                  "github_ref": "${GITHUB_REF}"
+                }
+              },
+              "materials": [
+                {"uri": "https://github.com/${GITHUB_REPOSITORY}@${GITHUB_SHA}"}
+              ],
+              "metadata": {
+                "buildInvocationId": "${GITHUB_RUN_ID}",
+                "completeness": {
+                  "parameters": true,
+                  "environment": false,
+                  "materials": false
+                },
+                "reproducible": false
               }
             }
           }
