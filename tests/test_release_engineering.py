@@ -55,7 +55,7 @@ def test_ci_has_all_three_required_checks():
     for marker in (
         "pip_audit",
         "bandit",
-        "gitleaks",
+        "github.com/zricethezav/gitleaks/v8@v8.30.1",
         "aquasecurity/trivy-action@v0.36.0",
     ):
         assert marker in security_steps
