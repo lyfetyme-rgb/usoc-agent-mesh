@@ -30,6 +30,9 @@ def load_manifests() -> list[dict]:
 
 
 DOCS = load_manifests()
+CLUSTER_SCOPED_KINDS = frozenset(
+    {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
+)
 
 
 def by_kind(kind: str) -> list[dict]:
@@ -67,7 +70,16 @@ def test_manifest_set_is_parseable_and_scoped_to_one_namespace():
     for doc in DOCS:
         assert doc.get("apiVersion"), doc
         assert doc.get("kind"), doc
-        if doc["kind"] != "Namespace":
+        if doc["kind"] in CLUSTER_SCOPED_KINDS:
+            # Admission policy objects are cluster-scoped; their binding must
+            # still narrow enforcement to this namespace via namespaceSelector.
+            if doc["kind"] == "ValidatingAdmissionPolicyBinding":
+                selector = (
+                    (doc.get("spec") or {}).get("matchResources", {}).get("namespaceSelector", {})
+                )
+                labels = selector.get("matchLabels", {})
+                assert labels.get("security.usoc/protected") == "true", doc
+        elif doc["kind"] != "Namespace":
             assert doc.get("metadata", {}).get("namespace") == "usoc-prod", doc
 
 

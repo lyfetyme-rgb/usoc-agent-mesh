@@ -140,6 +140,51 @@ def status_payload() -> dict:
     return payload
 
 
+def _kpi_counts() -> dict[str, int | str]:
+    """Read bounded executive counts from a server-side evidence file.
+
+    Unknown fields are dropped, so a caller cannot smuggle raw telemetry,
+    credentials or payloads into the browser response. When no trusted evidence
+    file is configured, counts are explicitly UNKNOWN rather than a misleading
+    zero.
+    """
+    fields = ("requirements", "tests", "deploy_approvals", "operational_validations")
+    unknown: dict[str, int | str] = {name: "UNKNOWN" for name in fields}
+    path = Path(config_value("USOC_KPI_EVIDENCE_FILE", "") or "")
+    if not path.is_file():
+        return unknown
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return unknown
+    if not isinstance(raw, dict):
+        return unknown
+    result: dict[str, int | str] = {}
+    for name in fields:
+        value = raw.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1_000_000:
+            result[name] = "UNKNOWN"
+        else:
+            result[name] = value
+    return result
+
+
+def executive_kpis() -> dict:
+    """Browser-safe executive summary: counts and status flags only."""
+    status = status_payload()
+    health = status.get("health") or {}
+    ready = status.get("ready") or {}
+    errors = status.get("errors") or {}
+    payload: dict = {
+        "health": "ok" if health.get("status") == "ok" else "degraded",
+        "ready": "ok" if ready.get("ready") is True else "degraded",
+        "degraded": bool(status.get("degraded")),
+        "error_count": len(errors) if isinstance(errors, dict) else 0,
+    }
+    payload.update(_kpi_counts())
+    return payload
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._host_allowed():
@@ -158,6 +203,9 @@ class Handler(BaseHTTPRequestHandler):
             # Always 200: the client needs the reason codes to distinguish an
             # auth failure, a timeout and a stale/unknown mesh state.
             self.respond(200, json.dumps(status_payload()).encode(), "application/json")
+            return
+        if self.path == "/api/executive-kpis":
+            self.respond(200, json.dumps(executive_kpis()).encode(), "application/json")
             return
         asset = ASSETS.get(self.path)
         if not asset:

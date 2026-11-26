@@ -57,6 +57,7 @@ $("refresh-now").addEventListener("click", () => {
   if (pollTimer) clearTimeout(pollTimer);
   pollTimer = null;
   refresh();
+  refreshExecutive();
 });
 
 /** Fetch with a bounded timeout so a hung proxy cannot pin the poll loop. */
@@ -92,6 +93,30 @@ function reasonLabel(reason) {
 function firstError(errors) {
   if (!errors) return null;
   return errors.health || errors.ready || null;
+}
+
+// Executive metrics are server-derived counts only. The browser never holds a
+// mesh token, raw telemetry, payload text or a local cache of either.
+function applyExecutive(data) {
+  for (const [id, key] of [
+    ["exec-health", "health"],
+    ["exec-ready", "ready"],
+    ["exec-requirements", "requirements"],
+    ["exec-tests", "tests"],
+    ["exec-approvals", "deploy_approvals"],
+    ["exec-validation", "operational_validations"],
+  ]) {
+    const value = data?.[key];
+    set(id, typeof value === "number" || typeof value === "string" ? value : UNKNOWN);
+  }
+}
+
+async function refreshExecutive() {
+  try {
+    applyExecutive(await getJson("/api/executive-kpis"));
+  } catch (_error) {
+    for (const id of ["exec-health","exec-ready","exec-requirements","exec-tests","exec-approvals","exec-validation"]) set(id, UNKNOWN);
+  }
 }
 
 function setSync(text, kind) {
@@ -164,6 +189,7 @@ async function refresh() {
   try {
     const data = await getJson("/api/status");
     applyValues(data);
+    await refreshExecutive();
     const error = firstError(data.errors);
     if (error) {
       setSync(`PARTIAL · ${reasonLabel(error)}`, "warn");
@@ -230,3 +256,4 @@ $("public-load").addEventListener("click", async () => {
 });
 
 refresh();
+refreshExecutive();

@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: range-scenarios
+  namespace: usoc-range
+data:
+  scenarios.json: |
+    {
+      "scenarios": [
+        "compromised-container",
+        "lateral-movement",
+        "credential-misuse",
+        "kev-remediation",
+        "ransomware-recovery",
+        "network-degradation",
+        "ddos-telemetry",
+        "failed-patch",
+        "rollback",
+        "backup-destruction"
+      ],
+      "egress": "deny-all",
+      "production_linkage": "none"
+    }

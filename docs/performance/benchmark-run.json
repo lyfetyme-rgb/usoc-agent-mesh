@@ -1,0 +1,25 @@
+{
+  "benchmark": {
+    "best": "strict",
+    "chain_head": {
+      "hash": "0fcc28ed3ee173c054b3e5a846cd258a44777980809d1c3bd37c7fc60e76e6d7",
+      "seq": 26
+    },
+    "hard_pass": true,
+    "mode": "adaptive",
+    "rehearsal_only": true,
+    "run_id": "e9073a58447f4e62",
+    "shadow": true,
+    "totals": {
+      "cases": 5,
+      "evaluations": 20,
+      "resolved": 10,
+      "unresolved": 5,
+      "variants": 3
+    },
+    "verified": true
+  },
+  "command": "python -m agents benchmark --rounds 2",
+  "generated_by": "toolbox/scripts/collect_performance_evidence.py",
+  "scope": "offline governance readiness benchmark; not a hyperscale claim"
+}

@@ -1,0 +1,49 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: usoc-section-six-hardening
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    - expression: "has(object.spec.securityContext) && object.spec.securityContext.runAsNonRoot == true"
+      message: "USOC pods must declare runAsNonRoot: true"
+      reason: Forbidden
+    - expression: "object.spec.containers.all(c, has(c.securityContext) && c.securityContext.readOnlyRootFilesystem == true)"
+      message: "USOC containers must use a read-only root filesystem"
+      reason: Forbidden
+    - expression: "object.spec.containers.all(c, c.securityContext.privileged != true)"
+      message: "Privileged containers are forbidden"
+      reason: Forbidden
+    - expression: "object.spec.containers.all(c, c.securityContext.allowPrivilegeEscalation == false)"
+      message: "Privilege escalation is forbidden"
+      reason: Forbidden
+    - expression: "object.spec.containers.all(c, has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && 'ALL' in c.securityContext.capabilities.drop)"
+      message: "All Linux capabilities must be dropped"
+      reason: Forbidden
+    - expression: "!has(object.spec.hostNetwork) || object.spec.hostNetwork == false"
+      message: "Host networking is forbidden"
+      reason: Forbidden
+    - expression: "!has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath))"
+      message: "hostPath volumes are forbidden"
+      reason: Forbidden
+    # Image digests are pinned by toolbox/scripts/render_overlay.py in the
+    # deployment workflow after cosign verification. They are deliberately not
+    # required here so the committed tag-based base manifests remain deployable.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: usoc-section-six-hardening-binding
+spec:
+  policyName: usoc-section-six-hardening
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        security.usoc/protected: "true"

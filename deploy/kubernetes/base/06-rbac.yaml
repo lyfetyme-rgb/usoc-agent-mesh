@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: usoc-recovery-sa
+  namespace: usoc-prod
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: usoc-config-read
+  namespace: usoc-prod
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: usoc-worker-config-read
+  namespace: usoc-prod
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: usoc-recovery
+  namespace: usoc-prod
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: usoc-mesh-config-read
+  namespace: usoc-prod
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: usoc-config-read
+subjects:
+  - kind: ServiceAccount
+    name: usoc-mesh-sa
+    namespace: usoc-prod
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: usoc-worker-config-read
+  namespace: usoc-prod
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: usoc-worker-config-read
+subjects:
+  - kind: ServiceAccount
+    name: usoc-worker-sa
+    namespace: usoc-prod
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: usoc-recovery-binding
+  namespace: usoc-prod
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: usoc-recovery
+subjects:
+  - kind: ServiceAccount
+    name: usoc-recovery-sa
+    namespace: usoc-prod

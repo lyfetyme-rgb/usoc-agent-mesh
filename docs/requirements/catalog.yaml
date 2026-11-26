@@ -24,7 +24,7 @@ requirements:
     issue: 27
     issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/27
     phase: 0
-    status: in_progress
+    status: implemented
     parent: null
     code:
       - .github/workflows/ci.yml
@@ -50,7 +50,7 @@ requirements:
     issue: 28
     issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/28
     phase: 0
-    status: in_progress
+    status: implemented
     parent: null
     code:
       - docs/requirements/catalog.yaml
@@ -73,18 +73,25 @@ requirements:
     issue: 29
     issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/29
     phase: 1
-    status: planned
+    status: implemented
     parent: null
     code:
+      - agents/aicee.py
+      - agents/control_plane.py
       - agents/governance.py
       - agents/ingress.py
       - agents/mesh.py
     tests:
+      - tests/test_aicee.py
+      - tests/test_control_plane.py
       - tests/test_governance.py
       - tests/test_ingress.py
-    artifacts: []
-    deployment_approval: Pending Phase 1 gated rollout
-    operational_validation: Pending Phase 1 benchmark and doctor evidence
+    artifacts:
+      - docs/architecture.md
+      - docs/readiness/assurance-matrix.md
+      - deploy/kubernetes/base/10-control-plane.yaml
+    deployment_approval: Protected main with staged rollout through the GitHub production environment and required checks
+    operational_validation: Signed Ed25519 envelope, server-side idempotency and bounded delegation in tests/test_control_plane.py; offline benchmark artifact in docs/performance/benchmark-run.json
 
   - id: REQ-004
     title: Production Waste Optimization Agent
@@ -95,18 +102,22 @@ requirements:
     issue: 30
     issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/30
     phase: 2
-    status: planned
+    status: implemented
     parent: null
     code:
+      - agents/waste.py
       - agents/connectors.py
       - agents/correlation.py
       - agents/usoc_agents.py
     tests:
+      - tests/test_waste.py
       - tests/test_connectors.py
       - tests/test_bengal.py
-    artifacts: []
-    deployment_approval: Pending Phase 2 HITL approval design
-    operational_validation: Pending Phase 2 before/after savings validation
+    artifacts:
+      - docs/readiness/assurance-matrix.md
+      - docs/performance/benchmark-run.json
+    deployment_approval: Protected main with explicit human approval required for every sandbox waste proposal
+    operational_validation: Deterministic before/after savings validation in tests/test_waste.py with evidence fingerprints only
 
   - id: REQ-005
     title: Seraphim security implementation
@@ -117,17 +128,27 @@ requirements:
     issue: 31
     issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/31
     phase: 3
-    status: planned
+    status: implemented
     parent: null
     code:
+      - agents/seraphim.py
       - agents/evidence.py
+      - deploy/kubernetes/base/06-rbac.yaml
       - deploy/kubernetes/base/20-network-policies.yaml
+      - deploy/kubernetes/base/21-admission-policy.yaml
+      - deploy/kubernetes/base/22-seraphim-quarantine.yaml
+      - deploy/kubernetes/base/23-workload-identity.yaml
     tests:
+      - tests/test_seraphim.py
+      - tests/test_seraphim_manifests.py
       - tests/test_security.py
       - tests/test_kubernetes_manifests.py
-    artifacts: []
-    deployment_approval: Pending Phase 3 security review
-    operational_validation: Pending Phase 3 admission/quarantine tests
+    artifacts:
+      - deploy/kubernetes/base/21-admission-policy.yaml
+      - deploy/kubernetes/base/22-seraphim-quarantine.yaml
+      - docs/readiness/threat-model.md
+    deployment_approval: Protected main with production environment required reviewer and security assurance gates
+    operational_validation: Offline admission, trusted-credential verifier, KEV freshness, RBAC and quarantine negative tests plus toolbox/scripts/readiness_check.py
 
   - id: REQ-006
     title: ACIE laboratory implementation
@@ -138,16 +159,21 @@ requirements:
     issue: 32
     issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/32
     phase: 3
-    status: planned
+    status: implemented
     parent: null
     code:
+      - agents/acie_lab.py
       - agents/fragmentation.py
+      - fixtures/acie/lab-network.jsonl
       - fixtures/fragmentation/network.jsonl
     tests:
+      - tests/test_acie_lab.py
       - tests/test_fragmentation.py
-    artifacts: []
-    deployment_approval: Pending Phase 3 lab approval
-    operational_validation: Pending Phase 3 simulation evidence
+    artifacts:
+      - fixtures/acie/lab-network.jsonl
+      - docs/readiness/assurance-matrix.md
+    deployment_approval: Lab-only replay; no production rollout or live edge attachment is authorized
+    operational_validation: Deterministic replay, measured edge reduction ratio and bounded advisory Omega score in tests/test_acie_lab.py
 
   - id: REQ-007
     title: Isolated Cyber Defense Range
@@ -158,16 +184,25 @@ requirements:
     issue: 33
     issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/33
     phase: 3
-    status: planned
+    status: blocked
     parent: null
     code:
+      - deploy/range/README.md
+      - deploy/range/00-namespace.yaml
+      - deploy/range/01-default-deny.yaml
+      - deploy/range/02-resource-quota.yaml
+      - toolbox/scripts/validate_range_isolation.py
       - subsystems.yaml
       - docs/architecture.md
     tests:
+      - tests/test_cyber_range.py
       - tests/test_redteam.py
-    artifacts: []
-    deployment_approval: Pending separate isolated range environment
-    operational_validation: Pending range scenario evidence
+    artifacts:
+      - deploy/range/README.md
+      - deploy/range/01-default-deny.yaml
+      - deploy/range/02-resource-quota.yaml
+    deployment_approval: In-repo scaffold approved for design only; executable deployment blocked pending a separate isolated range repository and account
+    operational_validation: Offline isolation validator passes; scenario evidence remains pending the external range repository
 
   - id: REQ-008
     title: UI/product views and executive outcomes
@@ -178,16 +213,20 @@ requirements:
     issue: 34
     issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/34
     phase: 4
-    status: planned
+    status: implemented
     parent: null
     code:
-      - dashboard/app.js
       - dashboard/server.py
+      - dashboard/app.js
+      - dashboard/index.html
     tests:
+      - tests/test_dashboard_executive.py
       - tests/test_dashboard_server.py
-    artifacts: []
-    deployment_approval: Pending Phase 4 product review
-    operational_validation: Pending executive KPI validation
+    artifacts:
+      - dashboard/index.html
+      - docs/readiness/assurance-matrix.md
+    deployment_approval: Protected main with product review; proxy remains read-only and loopback/Host allowlisted
+    operational_validation: Browser-safe executive KPI route with no-store/CSP headers and no token or local storage path
 
   - id: REQ-009
     title: Performance engineering benchmark suite
@@ -198,16 +237,19 @@ requirements:
     issue: 35
     issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/35
     phase: 4
-    status: planned
+    status: implemented
     parent: null
     code:
       - tests/loadtest/k6-health-probe.js
       - tests/loadtest/nonce_contention.py
+      - toolbox/scripts/collect_performance_evidence.py
     tests:
+      - tests/test_performance_evidence.py
       - tests/test_loadtest_artifacts.py
-    artifacts: []
-    deployment_approval: Pending Phase 4 performance review
-    operational_validation: Pending checked-in benchmark results
+    artifacts:
+      - docs/performance/benchmark-run.json
+    deployment_approval: Protected main with performance review; no hyperscale claim is authorized without new measured evidence
+    operational_validation: Checked-in real offline governance benchmark artifact and real-surface load harnesses with no invented dispatch endpoint
 
   - id: REQ-010
     title: Security and production readiness assurance
@@ -218,17 +260,23 @@ requirements:
     issue: 36
     issue_url: https://github.com/lyfetyme-rgb/usoc-agent-mesh/issues/36
     phase: 3
-    status: planned
+    status: implemented
     parent: null
     code:
       - SECURITY.md
       - .github/workflows/ci.yml
+      - toolbox/scripts/readiness_check.py
     tests:
+      - tests/test_readiness_assurance.py
       - tests/test_production_trust.py
       - tests/test_kubernetes_manifests.py
-    artifacts: []
-    deployment_approval: Pending security assurance evidence
-    operational_validation: Pending IR and recovery drill records
+    artifacts:
+      - docs/readiness/assurance-matrix.md
+      - docs/readiness/threat-model.md
+      - docs/readiness/incident-response.md
+      - docs/readiness/recovery-drill.md
+    deployment_approval: GitHub staging/production environments with required reviewers plus pytest, security and traceability checks
+    operational_validation: Automated Section 6 test matrix plus offline IR/recovery procedures with RTO/RPO targets; completed drill results must be recorded externally before being claimed
 
   - id: ENG-001
     title: Add requirement catalog and automated traceability check
