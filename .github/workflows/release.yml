@@ -127,39 +127,35 @@ jobs:
           for spec in "usoc-mesh:${MESH_DIGEST}" "usoc-dashboard:${DASH_DIGEST}"; do
             name="${spec%%:*}"
             digest="${spec#*:}"
-            hash="${digest#sha256:}"
+            # cosign's --predicate takes the predicate only; it constructs the
+            # in-toto statement and sets the predicateType from --type.
             cat > "${name}-provenance.json" <<EOF
           {
-            "_type": "https://in-toto.io/Statement/v0.1",
-            "subject": [{"name": "${name}", "digest": {"sha256": "${hash}"}}],
-            "predicateType": "https://slsa.dev/provenance/v0.2",
-            "predicate": {
-              "builder": {"id": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"},
-              "buildType": "https://github.com/actions/workflow",
-              "invocation": {
-                "configSource": {
-                  "uri": "https://github.com/${GITHUB_REPOSITORY}",
-                  "digest": {"sha1": "${GITHUB_SHA}"},
-                  "entryPoint": ".github/workflows/release.yml"
-                },
-                "parameters": {},
-                "environment": {
-                  "github_workflow": "${GITHUB_WORKFLOW}",
-                  "github_ref": "${GITHUB_REF}"
-                }
+            "builder": {"id": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"},
+            "buildType": "https://github.com/actions/workflow",
+            "invocation": {
+              "configSource": {
+                "uri": "https://github.com/${GITHUB_REPOSITORY}",
+                "digest": {"sha1": "${GITHUB_SHA}"},
+                "entryPoint": ".github/workflows/release.yml"
               },
-              "materials": [
-                {"uri": "https://github.com/${GITHUB_REPOSITORY}@${GITHUB_SHA}"}
-              ],
-              "metadata": {
-                "buildInvocationId": "${GITHUB_RUN_ID}",
-                "completeness": {
-                  "parameters": true,
-                  "environment": false,
-                  "materials": false
-                },
-                "reproducible": false
+              "parameters": {},
+              "environment": {
+                "github_workflow": "${GITHUB_WORKFLOW}",
+                "github_ref": "${GITHUB_REF}"
               }
+            },
+            "materials": [
+              {"uri": "https://github.com/${GITHUB_REPOSITORY}@${GITHUB_SHA}"}
+            ],
+            "metadata": {
+              "buildInvocationId": "${GITHUB_RUN_ID}",
+              "completeness": {
+                "parameters": true,
+                "environment": false,
+                "materials": false
+              },
+              "reproducible": false
             }
           }
           EOF
