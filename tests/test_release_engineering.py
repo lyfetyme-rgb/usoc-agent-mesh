@@ -52,7 +52,12 @@ def test_ci_has_all_three_required_checks():
     assert "python toolbox/scripts/traceability_check.py" in traceability_steps
 
     security_steps = str(data["jobs"]["security"])
-    for marker in ("pip_audit", "bandit", "gitleaks", "trivy-action"):
+    for marker in (
+        "pip_audit",
+        "bandit",
+        "gitleaks",
+        "aquasecurity/trivy-action@v0.28.0",
+    ):
         assert marker in security_steps
 
 
