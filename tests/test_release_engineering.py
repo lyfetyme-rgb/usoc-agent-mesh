@@ -89,6 +89,8 @@ def test_release_workflow_signs_attests_and_publishes_sboms():
         "cosign sign --yes",
         "cosign attest --yes --type spdxjson",
         "cosign attest --yes --type slsaprovenance",
+        '"predicateType": "https://slsa.dev/provenance/v0.2"',
+        '"builder": {"id":',
         "actions/upload-artifact@v4",
     ):
         assert marker in text
