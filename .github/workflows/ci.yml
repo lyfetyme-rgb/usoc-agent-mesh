@@ -96,7 +96,7 @@ jobs:
           go install github.com/gitleaks/gitleaks/v8@latest
           "$(go env GOPATH)/bin/gitleaks" detect --source . --no-git --redact --exit-code 1
       - name: Filesystem vulnerability scan (Trivy)
-        uses: aquasecurity/trivy-action@v0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
